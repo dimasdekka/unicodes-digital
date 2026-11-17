@@ -10,6 +10,13 @@ import { createBot } from "./bot";
 
 const bot = createBot();
 
+// Jangan mati kalau polling sempat error (mis. jaringan putus sesaat) —
+// log saja, runner grammY akan coba lagi. Tanpa ini, satu error tak
+// tertangani bisa mematikan seluruh proses bot.
+bot.catch((err) => {
+  console.error("[bot] error:", err);
+});
+
 bot.start().then(() => {
   console.log("Unicodes Digital bot jalan (long polling)...");
 });

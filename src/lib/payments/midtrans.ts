@@ -42,10 +42,44 @@ export interface SnapTransaction {
  *  order_id Midtrans = ID order internal kita (UD-...) supaya webhook nanti
  *  langsung ketahuan order mana. */
 export async function createSnapTransaction(orderId: string): Promise<SnapTransaction> {
-  const { serverKey, snapBase } = config();
   const order = await getStoreOrder(orderId);
   if (!order) throw new Error(`Order tidak ditemukan: ${orderId}`);
+  return createSnapTransactionRaw({
+    orderId: order.id,
+    grossAmount: order.retailTotalIdr,
+    itemId: order.catalogProductId,
+    itemName: order.catalogProductId,
+    itemPrice: order.retailTotalIdr / order.quantity,
+    itemQuantity: order.quantity,
+  });
+}
 
+/** Buat transaksi Snap untuk isi saldo dompet (order_id = TOPUP-...).
+ *  Tidak butuh baris store_orders — webhook nanti merutekan TOPUP- ke dompet. */
+export async function createSnapTransactionForTopup(
+  topupId: string,
+  amountIdr: number,
+): Promise<SnapTransaction> {
+  return createSnapTransactionRaw({
+    orderId: topupId,
+    grossAmount: amountIdr,
+    itemId: "wallet-topup",
+    itemName: "Isi Saldo Unicodes Digital",
+    itemPrice: amountIdr,
+    itemQuantity: 1,
+  });
+}
+
+/** Pembuat Snap generik (order produk maupun top-up). */
+async function createSnapTransactionRaw(input: {
+  orderId: string;
+  grossAmount: number;
+  itemId: string;
+  itemName: string;
+  itemPrice: number;
+  itemQuantity: number;
+}): Promise<SnapTransaction> {
+  const { serverKey, snapBase } = config();
   const res = await fetch(`${snapBase}/transactions`, {
     method: "POST",
     headers: {
@@ -54,15 +88,15 @@ export async function createSnapTransaction(orderId: string): Promise<SnapTransa
     },
     body: JSON.stringify({
       transaction_details: {
-        order_id: order.id,
-        gross_amount: order.retailTotalIdr,
+        order_id: input.orderId,
+        gross_amount: input.grossAmount,
       },
       item_details: [
         {
-          id: order.catalogProductId,
-          price: order.retailTotalIdr / order.quantity,
-          quantity: order.quantity,
-          name: order.catalogProductId,
+          id: input.itemId,
+          price: input.itemPrice,
+          quantity: input.itemQuantity,
+          name: input.itemName,
         },
       ],
       // TODO: isi customer_details dari data pembeli (nama/email/HP) kalau ada.
@@ -195,12 +229,47 @@ export async function refundMidtrans(
  *  Sebelum markPaid, status dikonfirmasi ulang ke API Midtrans (aturan docs:
  *  webhook = kapan bertanya, API status = apakah benar lunas). Kalau API
  *  konfirmasi tidak bisa dihubungi, pakai nilai webhook (sudah terverifikasi
- *  signature) dan catat peringatan — jangan sampai pembayaran legit macet. */
+ *  signature) dan catat peringatan — jangan sampai pembayaran legit macet.
+ *  TOPUP-... = isi saldo dompet (bukan order produk) — dikredit ke dompet,
+ *  BUKAN ke store_orders. */
 export async function handleMidtransNotification(input: {
   orderId: string;
   transactionStatus: MidtransStatus;
   fraudStatus?: string;
 }): Promise<{ handled: boolean; reason: string }> {
+  // --- Isi saldo dompet (TOPUP-...) ---
+  if (input.orderId.startsWith("TOPUP-")) {
+    const { getTopup, markTopupPaid } = await import("../wallet");
+    const topup = await getTopup(input.orderId);
+    if (!topup) return { handled: false, reason: "top-up tidak ditemukan" };
+    if (topup.status === "paid") {
+      return { handled: true, reason: "top-up sudah dikredit sebelumnya" };
+    }
+    let transactionStatus = input.transactionStatus;
+    try {
+      const confirmed = await getMidtransStatus(input.orderId);
+      transactionStatus = confirmed.transactionStatus;
+    } catch (err) {
+      console.warn(
+        `[midtrans] konfirmasi status top-up ${input.orderId} gagal, pakai nilai webhook:`,
+        err instanceof Error ? err.message : String(err),
+      );
+    }
+    const paid =
+      transactionStatus === "settlement" ||
+      (transactionStatus === "capture" && input.fraudStatus !== "deny");
+    if (!paid) {
+      return { handled: true, reason: `top-up status ${transactionStatus} — menunggu` };
+    }
+    const { credited } = await markTopupPaid(input.orderId);
+    return {
+      handled: true,
+      reason: credited
+        ? `top-up ${input.orderId} dikredit ke dompet`
+        : "top-up sudah dikredit sebelumnya",
+    };
+  }
+
   const order = await getStoreOrder(input.orderId);
   if (!order) return { handled: false, reason: "order tidak ditemukan" };
 
@@ -223,10 +292,24 @@ export async function handleMidtransNotification(input: {
   if (paid) {
     const paidOrder = await markPaid(order.id);
     if (paidOrder.status === "paid") {
-      // Jalan di background — jangan tahan webhook.
-      void fulfillOrder(order.id).catch((err: unknown) => {
-        console.error(`[midtrans] fulfill ${order.id} gagal:`, err);
-      });
+      // Reward referral: order berbayar pertama teman yang diundang.
+      try {
+        const { maybeRewardReferrer, tgIdFromBuyerRef } = await import("../wallet");
+        const tgId = tgIdFromBuyerRef(paidOrder.buyerRef);
+        if (tgId != null) maybeRewardReferrer(tgId);
+      } catch (err) {
+        console.error(`[midtrans] reward referral ${order.id} gagal:`, err);
+      }
+      // Jalan di background — jangan tahan webhook. Setelah selesai,
+      // kabari pembeli di Telegram (kalau order dari bot).
+      void fulfillOrder(order.id)
+        .then(async (done) => {
+          const { notifyBuyer } = await import("../notify");
+          await notifyBuyer(done);
+        })
+        .catch((err: unknown) => {
+          console.error(`[midtrans] fulfill ${order.id} gagal:`, err);
+        });
     }
     return { handled: true, reason: "paid -> fulfill dimulai" };
   }

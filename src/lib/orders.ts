@@ -50,6 +50,12 @@ export interface StoreOrder {
   sheeridUrl?: string | null;
   /** Target pesanan (Sondev, produk on-demand): kode invite / email target. */
   target?: string | null;
+  /** Diskon promo yang diterapkan (Rp) — total = harga*qty - discount. */
+  discountIdr: number;
+  /** Kode promo yang dipakai (kalau ada). */
+  promoCode?: string | null;
+  /** Cara bayar: "midtrans" | "wallet" | null (belum dibayar). */
+  paidVia?: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -69,6 +75,9 @@ interface OrderRow {
   xiaomi_accounts: string | null;
   sheerid_url: string | null;
   target: string | null;
+  discount_idr: number;
+  promo_code: string | null;
+  paid_via: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -91,6 +100,9 @@ function toStoreOrder(row: OrderRow): StoreOrder {
       : undefined,
     sheeridUrl: row.sheerid_url,
     target: row.target,
+    discountIdr: row.discount_idr ?? 0,
+    promoCode: row.promo_code,
+    paidVia: row.paid_via,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -102,22 +114,32 @@ function newId(): string {
     .slice(2, 8)}`.toUpperCase();
 }
 
+/** Buat ID order baru (dipakai bot untuk menukar promo SEBELUM order dibuat,
+ *  supaya redemption tercatat dengan ID order yang benar). */
+export function newOrderId(): string {
+  return newId();
+}
+
 export async function createStoreOrder(input: {
+  id?: string;
   catalogProductId: string;
   quantity?: number;
   buyerRef?: string | null;
   xiaomiAccounts?: string[];
   sheeridUrl?: string | null;
   target?: string | null;
+  discountIdr?: number;
+  promoCode?: string | null;
 }): Promise<StoreOrder> {
   const product = getCatalogProduct(input.catalogProductId);
   const quantity = input.quantity ?? 1;
+  const discountIdr = Math.max(0, Math.min(input.discountIdr ?? 0, product.retailPriceIdr * quantity));
   const now = new Date().toISOString();
   const order: StoreOrder = {
-    id: newId(),
+    id: input.id ?? newId(),
     catalogProductId: product.id,
     quantity,
-    retailTotalIdr: product.retailPriceIdr * quantity,
+    retailTotalIdr: Math.max(0, product.retailPriceIdr * quantity - discountIdr),
     status: "awaiting_payment",
     supplier: product.supplier,
     supplierOrderId: null,
@@ -128,6 +150,9 @@ export async function createStoreOrder(input: {
     xiaomiAccounts: input.xiaomiAccounts,
     sheeridUrl: input.sheeridUrl ?? null,
     target: input.target ?? null,
+    discountIdr,
+    promoCode: input.promoCode ?? null,
+    paidVia: null,
     createdAt: now,
     updatedAt: now,
   };
@@ -135,8 +160,9 @@ export async function createStoreOrder(input: {
     `INSERT INTO store_orders
       (id, catalog_product_id, quantity, retail_total_idr, status, supplier,
        supplier_order_id, delivered_items, result_link, error, buyer_ref,
-       xiaomi_accounts, sheerid_url, target, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       xiaomi_accounts, sheerid_url, target, discount_idr, promo_code, paid_via,
+       created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
   ).run(
     order.id,
     order.catalogProductId,
@@ -152,6 +178,9 @@ export async function createStoreOrder(input: {
     order.xiaomiAccounts ? JSON.stringify(order.xiaomiAccounts) : null,
     order.sheeridUrl ?? null,
     order.target ?? null,
+    order.discountIdr,
+    order.promoCode ?? null,
+    order.paidVia ?? null,
     order.createdAt,
     order.updatedAt,
   );
@@ -170,6 +199,33 @@ export async function listStoreOrders(limit = 50): Promise<StoreOrder[]> {
     .prepare("SELECT * FROM store_orders ORDER BY created_at DESC LIMIT ?")
     .all(limit) as unknown as OrderRow[];
   return rows.map(toStoreOrder);
+}
+
+/** Order milik satu pembeli (bot: buyerRef `tg:<id>`), terbaru dulu. */
+export async function listOrdersByBuyer(
+  buyerRef: string,
+  limit = 10,
+): Promise<StoreOrder[]> {
+  const rows = getDb()
+    .prepare(
+      "SELECT * FROM store_orders WHERE buyer_ref = ? ORDER BY created_at DESC LIMIT ?",
+    )
+    .all(buyerRef, limit) as unknown as OrderRow[];
+  return rows.map(toStoreOrder);
+}
+
+/** Statistik pembeli untuk layar /start: jumlah order berbayar + total belanja. */
+export async function getBuyerStats(
+  buyerRef: string,
+): Promise<{ orderCount: number; totalSpentIdr: number }> {
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n, COALESCE(SUM(retail_total_idr), 0) AS total
+         FROM store_orders
+        WHERE buyer_ref = ? AND status IN ('paid', 'processing', 'delivered')`,
+    )
+    .get(buyerRef) as { n: number; total: number };
+  return { orderCount: row.n, totalSpentIdr: row.total };
 }
 
 async function updateOrder(
@@ -202,6 +258,10 @@ async function updateOrder(
     sets.push("target = ?");
     values.push(data.target);
   }
+  if (data.paidVia !== undefined) {
+    sets.push("paid_via = ?");
+    values.push(data.paidVia);
+  }
   values.push(id);
   getDb().prepare(`UPDATE store_orders SET ${sets.join(", ")} WHERE id = ?`).run(
     ...values,
@@ -216,6 +276,14 @@ export async function setOrderTarget(id: string, target: string): Promise<StoreO
   const order = await getStoreOrder(id);
   if (!order) throw new Error(`Order tidak ditemukan: ${id}`);
   return updateOrder(id, { target });
+}
+
+/** Catat cara bayar order (dipanggil sebelum markPaid dari jalur bot). */
+export async function setOrderPaidVia(
+  id: string,
+  paidVia: "midtrans" | "wallet",
+): Promise<StoreOrder> {
+  return updateOrder(id, { paidVia });
 }
 
 /** Dipanggil webhook Midtrans setelah bayar lunas (settlement/capture). */
@@ -310,7 +378,9 @@ export async function checkSupplierFunds(
  *  karena fulfillOrder hanya jalan untuk order "paid"). Kalau refund berhasil,
  *  status jadi "refunded". Kalau refund gagal, status tetap "failed" dengan
  *  catatan refund manual. Tidak pernah throw — kegagalan refund tidak boleh
- *  menutupi status gagal ordernya. */
+ *  menutupi status gagal ordernya.
+ *  PENGECUALIAN: order yang dibayar dari DOMPET (paid_via = "wallet") tidak
+ *  punya transaksi Midtrans — refund dikembalikan ke dompet pembeli. */
 async function failOrder(
   orderId: string,
   error: string,
@@ -323,6 +393,32 @@ async function failOrder(
     resultLink,
     error,
   });
+  // Order dompet -> refund ke dompet (bukan Midtrans).
+  if (failed.paidVia === "wallet") {
+    try {
+      const { refundWalletForOrder, tgIdFromBuyerRef } = await import("./wallet");
+      const tgId = tgIdFromBuyerRef(failed.buyerRef);
+      if (tgId != null && failed.retailTotalIdr > 0) {
+        await refundWalletForOrder({
+          tgId,
+          amountIdr: failed.retailTotalIdr,
+          orderId: failed.id,
+        });
+        return updateOrder(failed.id, {
+          status: "refunded",
+          error: `${error} — saldo sudah dikembalikan ke dompet kamu.`,
+        });
+      }
+    } catch (refundErr) {
+      console.error(
+        `[orders] refund dompet ${failed.id} gagal:`,
+        refundErr instanceof Error ? refundErr.message : String(refundErr),
+      );
+    }
+    return updateOrder(failed.id, {
+      error: `${error} — refund ke dompet gagal, hubungi admin.`,
+    });
+  }
   try {
     // Dynamic import: midtrans.ts mengimpor orders.ts — hindari circular import statis.
     const { refundMidtrans } = await import("./payments/midtrans");

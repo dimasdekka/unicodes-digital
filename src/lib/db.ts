@@ -49,6 +49,76 @@ function openDb(): DatabaseSync {
       source TEXT NOT NULL,
       received_at TEXT NOT NULL
     );
+    -- Pengguna bot Telegram (satu baris per chat id).
+    CREATE TABLE IF NOT EXISTS users (
+      tg_id INTEGER PRIMARY KEY,
+      first_name TEXT,
+      username TEXT,
+      lang TEXT NOT NULL DEFAULT 'id',
+      referrer_tg_id INTEGER,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    -- Dompet pembeli (saldo dipakai bayar order; diisi via Midtrans Snap).
+    CREATE TABLE IF NOT EXISTS wallets (
+      tg_id INTEGER PRIMARY KEY,
+      balance_idr INTEGER NOT NULL DEFAULT 0,
+      total_topup_idr INTEGER NOT NULL DEFAULT 0,
+      total_spent_idr INTEGER NOT NULL DEFAULT 0,
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY (tg_id) REFERENCES users(tg_id)
+    );
+    -- Riwayat mutasi dompet (+masuk, -keluar).
+    CREATE TABLE IF NOT EXISTS wallet_txns (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      tg_id INTEGER NOT NULL,
+      kind TEXT NOT NULL,
+      amount_idr INTEGER NOT NULL,
+      balance_after_idr INTEGER NOT NULL,
+      ref TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_wallet_txns_tg ON wallet_txns(tg_id, created_at);
+    -- Isi saldo via Midtrans Snap (order_id Midtrans = id ini).
+    CREATE TABLE IF NOT EXISTS wallet_topups (
+      id TEXT PRIMARY KEY,
+      tg_id INTEGER NOT NULL,
+      amount_idr INTEGER NOT NULL,
+      status TEXT NOT NULL DEFAULT 'awaiting_payment',
+      created_at TEXT NOT NULL,
+      paid_at TEXT
+    );
+    -- Kode promo (dibuat admin via /promo_add).
+    CREATE TABLE IF NOT EXISTS promo_codes (
+      code TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      value INTEGER NOT NULL,
+      max_uses INTEGER,
+      uses_count INTEGER NOT NULL DEFAULT 0,
+      valid_until TEXT,
+      created_by TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS promo_redemptions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      code TEXT NOT NULL,
+      tg_id INTEGER NOT NULL,
+      order_id TEXT,
+      discount_idr INTEGER NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE(code, tg_id)
+    );
+    -- Referral: siapa mengundang siapa; reward dibayar sekali per teman.
+    CREATE TABLE IF NOT EXISTS referrals (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      referrer_tg_id INTEGER NOT NULL,
+      referred_tg_id INTEGER NOT NULL UNIQUE,
+      rewarded INTEGER NOT NULL DEFAULT 0,
+      rewarded_at TEXT,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_tg_id);
   `);
   // Migrasi ringan: tambah kolom target kalau belum ada (order lama tetap jalan).
   const cols = db
@@ -56,6 +126,16 @@ function openDb(): DatabaseSync {
     .all() as { name: string }[];
   if (!cols.some((c) => c.name === "target")) {
     db.exec("ALTER TABLE store_orders ADD COLUMN target TEXT");
+  }
+  // Migrasi bot v2: diskon promo + cara bayar (untuk refund dompet).
+  if (!cols.some((c) => c.name === "discount_idr")) {
+    db.exec("ALTER TABLE store_orders ADD COLUMN discount_idr INTEGER NOT NULL DEFAULT 0");
+  }
+  if (!cols.some((c) => c.name === "promo_code")) {
+    db.exec("ALTER TABLE store_orders ADD COLUMN promo_code TEXT");
+  }
+  if (!cols.some((c) => c.name === "paid_via")) {
+    db.exec("ALTER TABLE store_orders ADD COLUMN paid_via TEXT");
   }
   return db;
 }

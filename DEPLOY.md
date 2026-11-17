@@ -48,7 +48,19 @@ dan bot butuh proses yang jalan terus.
      `https://<domain>/api/webhooks/sondev`, lalu `POST /webhook/test`
    - Midtrans: dashboard → Settings → Configuration → Payment Notification
      URL: `https://<domain>/api/webhooks/midtrans`
-7. **Tes end-to-end:** 1 order kecil muse_token (target kode invite diisi)
+7. **Telegram Web App (Mini App) — toko di dalam Telegram:**
+   - Halaman toko Mini App ada di route `/tg` (katalog + checkout asli).
+     Pembeli membayar lewat link Snap yang dibuka di luar WebView.
+   - Setelah `NEXT_PUBLIC_APP_URL` terisi domain publik + redeploy, tombol
+     inline "🌐 Buka Toko" muncul otomatis di menu utama bot.
+   - Menu Button bot (tombol "Menu" kiri bawah chat) jadi "Buka Toko":
+     jalankan SEKALI dari repo ini (butuh `.env.local` berisi
+     `TELEGRAM_BOT_TOKEN` + `NEXT_PUBLIC_APP_URL` domain publik):
+     ```sh
+     npx tsx src/bot/set-menu-button.ts
+     ```
+     Sebelum domain publik ada, perintah di atas sengaja menolak jalan.
+8. **Tes end-to-end:** 1 order kecil muse_token (target kode invite diisi)
    — ini juga verifikasi live pertama key Sondev (dari VM ini selalu 403).
 
 ## Catatan
