@@ -17,6 +17,7 @@ import { getCatalogProduct } from "./catalog";
 import { getDb } from "./db";
 import { getSupplier } from "./suppliers";
 import { LahaStoreAdapter } from "./suppliers/lahastore";
+import { IDR_PER_USD, VND_PER_USD } from "./pricing";
 import type {
   SupplierId,
   SupplierOrderResult,
@@ -259,6 +260,88 @@ function isTerminal(status: string): boolean {
   return ["success", "failed", "cancelled"].includes(status);
 }
 
+/** Cek apakah saldo supplier cukup untuk meng-cover harga grosir produk x qty.
+ *  Dipakai SEBELUM pembeli bayar (POST /api/orders) dan di awal fulfillOrder.
+ *  FAIL OPEN: kalau API supplier tidak bisa dicek (mis. Cloudflare 403 dari
+ *  VM ini) atau harga grosir tidak diketahui, order tetap jalan seperti dulu
+ *  — jangan blokir pembeli karena cek yang gagal. Hanya tolak kalau SUDAH
+ *  PASTI saldo tidak cukup (saldo + harga grosir sama-sama terbaca). */
+export async function checkSupplierFunds(
+  catalogProductId: string,
+  quantity: number,
+): Promise<{ ok: boolean; reason?: string }> {
+  const product = getCatalogProduct(catalogProductId);
+  const supplier = getSupplier(product.supplier);
+  try {
+    const [balance, products] = await Promise.all([
+      supplier.getBalance(),
+      supplier.listProducts(),
+    ]);
+    const wholesale = products.find(
+      (p) => p.code === product.supplierProductCode,
+    );
+    if (!wholesale) return { ok: true }; // produk tidak ada di katalog live — jangan blokir
+    const unitIdr =
+      wholesale.wholesalePriceIdr ??
+      (wholesale.wholesalePriceUsd != null
+        ? wholesale.wholesalePriceUsd * IDR_PER_USD
+        : null);
+    if (unitIdr == null) return { ok: true }; // harga grosir tidak diketahui — jangan blokir
+    const vnd =
+      typeof (balance.raw as { vnd?: unknown } | null)?.vnd === "number"
+        ? ((balance.raw as { vnd: number }).vnd * IDR_PER_USD) / VND_PER_USD
+        : 0;
+    const fundsIdr = balance.idr + balance.usd * IDR_PER_USD + vnd;
+    const needIdr = unitIdr * quantity;
+    if (fundsIdr < needIdr) {
+      return {
+        ok: false,
+        reason:
+          "Produk ini sedang tidak bisa dibeli — stok supplier belum tersedia. Coba lagi nanti.",
+      };
+    }
+    return { ok: true };
+  } catch {
+    return { ok: true }; // cek gagal — fail open
+  }
+}
+
+/** Tandai order gagal + coba refund otomatis via Midtrans (pembeli sudah bayar,
+ *  karena fulfillOrder hanya jalan untuk order "paid"). Kalau refund berhasil,
+ *  status jadi "refunded". Kalau refund gagal, status tetap "failed" dengan
+ *  catatan refund manual. Tidak pernah throw — kegagalan refund tidak boleh
+ *  menutupi status gagal ordernya. */
+async function failOrder(
+  orderId: string,
+  error: string,
+  deliveredItems: string[] = [],
+  resultLink: string | null = null,
+): Promise<StoreOrder> {
+  const failed = await updateOrder(orderId, {
+    status: "failed",
+    deliveredItems,
+    resultLink,
+    error,
+  });
+  try {
+    // Dynamic import: midtrans.ts mengimpor orders.ts — hindari circular import statis.
+    const { refundMidtrans } = await import("./payments/midtrans");
+    await refundMidtrans(failed.id, failed.retailTotalIdr);
+    return updateOrder(failed.id, {
+      status: "refunded",
+      error: `${error} — refund ke pembeli sudah diproses.`,
+    });
+  } catch (refundErr) {
+    console.error(
+      `[orders] refund otomatis ${failed.id} gagal:`,
+      refundErr instanceof Error ? refundErr.message : String(refundErr),
+    );
+    return updateOrder(failed.id, {
+      error: `${error} — refund otomatis gagal, refund manual via dashboard Midtrans.`,
+    });
+  }
+}
+
 /** Jalankan fulfillment ke supplier. Hanya untuk order yang sudah "paid".
  *  Polling bisa makan waktu sampai ~5 menit — di produksi jalankan dari
  *  worker/queue atau tanpa await dari webhook, JANGAN tahan request HTTP. */
@@ -275,9 +358,13 @@ export async function fulfillOrder(orderId: string): Promise<StoreOrder> {
   await updateOrder(order.id, { status: "processing" });
 
   try {
-    // 1) Cek saldo supplier sebelum belanja (gagal di sini = jangan lanjut).
-    // TODO: bandingkan dengan harga grosir produk x qty via supplier.listProducts().
-    await supplier.getBalance();
+    // 1) Cek saldo supplier sebelum belanja. Kalau SUDAH PASTI tidak cukup,
+    //    lempar error -> order gagal -> refund otomatis (lihat failOrder).
+    //    Kalau ceknya gagal (API tidak bisa dihubungi), fail open: lanjut.
+    const funds = await checkSupplierFunds(product.id, order.quantity);
+    if (!funds.ok) {
+      throw new Error(funds.reason ?? "Saldo supplier tidak cukup");
+    }
 
     // 2) Buat order ke supplier — idempotency key = ID order internal.
     const deadline = Date.now() + 5 * 60_000;
@@ -387,27 +474,25 @@ export async function fulfillOrder(orderId: string): Promise<StoreOrder> {
       });
     }
     if (failed) {
-      return updateOrder(order.id, {
-        status: "failed",
-        deliveredItems,
-        resultLink,
-        error:
-          failed.errorMessage ??
+      return failOrder(
+        order.id,
+        failed.errorMessage ??
           failed.errorCode ??
           "Supplier gagal memproses order",
-      });
+        deliveredItems,
+        resultLink,
+      );
     }
-    return updateOrder(order.id, {
-      status: "failed",
+    return failOrder(
+      order.id,
+      "Timeout menunggu supplier — refund ke pembeli diproses otomatis, cek manual di admin.",
       deliveredItems,
       resultLink,
-      error:
-        "Timeout menunggu supplier — cek manual di admin. Jangan buat order baru (pakai idempotency key yang sama).",
-    });
+    );
   } catch (err) {
-    return updateOrder(order.id, {
-      status: "failed",
-      error: err instanceof Error ? err.message : String(err),
-    });
+    return failOrder(
+      order.id,
+      err instanceof Error ? err.message : String(err),
+    );
   }
 }

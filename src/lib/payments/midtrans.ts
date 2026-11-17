@@ -147,6 +147,47 @@ export type MidtransStatus =
   | "expire"
   | "refund";
 
+/** Refund transaksi Midtrans (dipakai otomatis kalau fulfillment gagal setelah
+ *  pembeli bayar). refund_key unik per order supaya retry tidak double-refund.
+ *  Hanya untuk transaksi yang sudah settlement/capture — order kita hanya
+ *  masuk fulfill setelah lunas, jadi syarat ini terpenuhi. */
+export async function refundMidtrans(
+  orderId: string,
+  amount: number,
+): Promise<void> {
+  const { serverKey, isProduction } = config();
+  const base = isProduction
+    ? "https://api.midtrans.com"
+    : "https://api.sandbox.midtrans.com";
+  const res = await fetch(
+    `${base}/v2/${encodeURIComponent(orderId)}/refund`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${Buffer.from(`${serverKey}:`).toString(
+          "base64",
+        )}`,
+      },
+      body: JSON.stringify({
+        refund_key: `refund-${orderId}`,
+        amount,
+        reason: "Fulfillment supplier gagal",
+      }),
+      signal: AbortSignal.timeout(15000),
+    },
+  );
+  const body = (await res.json().catch(() => ({}))) as Record<
+    string,
+    unknown
+  >;
+  if (!res.ok) {
+    throw new Error(
+      `Midtrans refund gagal: ${String(body.status_message ?? res.status)}`,
+    );
+  }
+}
+
 /** Proses satu notifikasi webhook Midtrans. Dipanggil route webhook setelah
  *  signature terverifikasi. Settlement/capture = lunas -> markPaid -> fulfill.
  *  fulfillOrder dijalankan TANPA await (polling bisa ~10 menit) supaya webhook

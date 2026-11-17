@@ -1,10 +1,12 @@
+import { cookies } from "next/headers";
 import { listActiveProducts } from "@/lib/catalog";
 import { listStoreOrders } from "@/lib/orders";
 import { getSupplier } from "@/lib/suppliers";
 import type { SupplierId } from "@/lib/suppliers/types";
+import { ADMIN_COOKIE, adminPasswordHash, isAdminCookieValid } from "@/lib/admin-auth";
 
-// TODO: lindungi halaman ini sebelum dibuka ke publik
-// (mis. middleware + password admin / session login). Saat ini terbuka.
+// Halaman admin dilindungi login password (cookie, lihat /api/admin/login).
+// Tanpa ADMIN_PASSWORD di env, halaman tidak bisa dibuka siapa pun.
 export const dynamic = "force-dynamic";
 
 const rupiah = (n: number) => `Rp${n.toLocaleString("id-ID")}`;
@@ -23,7 +25,67 @@ async function supplierBalance(id: SupplierId): Promise<{ text: string; raw: Rec
   }
 }
 
-export default async function AdminPage() {
+export default async function AdminPage({
+  searchParams,
+}: {
+  searchParams?: Promise<{ error?: string }>;
+}) {
+  const params = await searchParams;
+  const jar = await cookies();
+  const authed = isAdminCookieValid(jar.get(ADMIN_COOKIE)?.value);
+
+  if (!authed) {
+    const configured = adminPasswordHash() !== null;
+    return (
+      <>
+        <h1>Admin — Unicodes Digital</h1>
+        {!configured ? (
+          <p style={{ color: "#f87171" }}>
+            ADMIN_PASSWORD belum diisi di env — halaman admin tidak bisa
+            dibuka. Isi dulu di .env.local / Railway Variables.
+          </p>
+        ) : (
+          <>
+            {params?.error && (
+              <p style={{ color: "#f87171" }}>Password salah, coba lagi.</p>
+            )}
+            <form action="/api/admin/login" method="post">
+              <p>
+                <input
+                  type="password"
+                  name="password"
+                  placeholder="Password admin"
+                  required
+                  style={{
+                    padding: 10,
+                    background: "#14092b",
+                    border: "1px solid #6d28d9",
+                    borderRadius: 8,
+                    color: "#ede9fe",
+                  }}
+                />
+              </p>
+              <button
+                type="submit"
+                style={{
+                  background: "#7c3aed",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: 8,
+                  padding: "10px 20px",
+                  fontWeight: 600,
+                  cursor: "pointer",
+                }}
+              >
+                Masuk
+              </button>
+            </form>
+          </>
+        )}
+      </>
+    );
+  }
+
   const [orders, sondev, lahastore] = await Promise.all([
     listStoreOrders(50),
     supplierBalance("sondev"),
@@ -34,6 +96,11 @@ export default async function AdminPage() {
   return (
     <>
       <h1>Admin — Unicodes Digital</h1>
+      <p>
+        <a href="/api/admin/logout" style={{ color: "#b3a1e6", fontSize: 13 }}>
+          Keluar
+        </a>
+      </p>
 
       <h2>Saldo supplier</h2>
       <ul>

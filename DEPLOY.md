@@ -16,11 +16,15 @@ dan bot butuh proses yang jalan terus.
      (INVALID_API_KEY); kirim ulang key yang benar sebelum isi di Railway
    - `TELEGRAM_BOT_TOKEN` — sudah ada di `.env.local`
    - `TELEGRAM_ADMIN_IDS` — ID angka Telegram kamu (dari @userinfobot)
-   - `MIDTRANS_SERVER_KEY`, `MIDTRANS_CLIENT_KEY` — setelah daftar Midtrans
-     (atau Doku — lihat putusan NPWP); mulai dari sandbox,
-     `MIDTRANS_IS_PRODUCTION=false`
+   - `ADMIN_PASSWORD` — password login halaman `/admin` (sudah dibuat, ada di `.env.local`)
+   - `MIDTRANS_SERVER_KEY`, `MIDTRANS_CLIENT_KEY` — key PRODUKSI sudah di-set
+     (terverifikasi, `MIDTRANS_IS_PRODUCTION=true`); isi juga di Railway.
    - `NEXT_PUBLIC_APP_URL` — isi SETELAH deploy pertama, pakai URL publik
      Railway, lalu redeploy
+
+> **Penting sebelum deploy Railway:** bot Telegram saat ini jalan sementara
+> dari VM ini. Setelah service Railway hidup, matikan bot di VM supaya tidak
+> ada dua poller yang rebutan update (`pkill -f "tsx src/bot/run.ts"`).
 
 ## Langkah deploy
 

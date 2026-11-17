@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { createStoreOrder } from "@/lib/orders";
+import { checkSupplierFunds, createStoreOrder } from "@/lib/orders";
 import { createSnapTransaction } from "@/lib/payments/midtrans";
 
 /**
@@ -18,6 +18,16 @@ export async function POST(req: Request) {
       typeof body.quantity === "number" && body.quantity > 0
         ? Math.floor(body.quantity)
         : 1;
+    // Jangan biarkan pembeli bayar kalau SUDAH PASTI saldo supplier tidak
+    // cukup. Kalau ceknya gagal (API supplier tidak bisa dihubungi),
+    // checkSupplierFunds fail open — order tetap jalan seperti dulu.
+    const funds = await checkSupplierFunds(productId, quantity);
+    if (!funds.ok) {
+      return NextResponse.json(
+        { ok: false, error: funds.reason ?? "Produk ini sedang tidak bisa dibeli." },
+        { status: 400 },
+      );
+    }
     const order = await createStoreOrder({
       catalogProductId: productId,
       quantity,
