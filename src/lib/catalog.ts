@@ -4,8 +4,21 @@
 //   - Sondev  = Muse
 //   - LahaStore = AI lain (Gemini dkk)
 //
-// Tambah produk baru = tambah 1 objek di bawah ini. Tambah store baru =
-// lihat src/lib/suppliers/index.ts (cukup tambah adapter + daftarkan).
+// Tambah produk baru = tambah 1 objek di bawah ini, dengan:
+//   - category: kelompok tampilannya ("Muse" / "AI Lain" / ...).
+//     Bot menampilkan pilih kategori dulu, web menampilkan filter kategori.
+//   - stockState: "available" (bisa dibeli), "out_of_stock" (stok habis),
+//     "coming_soon" (segera hadir). Bot + web menampilkan badge & tombol
+//     berbeda per state; produk yang tidak available TIDAK bisa dibeli.
+//   - supplier + supplierProductCode + fulfillment sesuai adapter supplier.
+// Tambah store baru = lihat src/lib/suppliers/index.ts (cukup tambah
+// adapter + daftarkan).
+//
+// CATATAN: katalog asli LahaStore (banyak produk + kategorinya) BELUM BISA
+// ditarik — API key di .env.local ditolak 401 dan key yang benar belum
+// dikirim ulang. JANGAN mengarang produk/kategori LahaStore; katalog di sini
+// masih 3 produk seed. Begitu key benar tersedia, produk asli tinggal
+// ditambahkan di bawah dengan category + stockState masing-masing.
 import { retailPrice } from "./pricing";
 import type { SupplierId } from "./suppliers/types";
 
@@ -14,6 +27,9 @@ export type Fulfillment =
   | "lahastore-xiaomi3" // Gemini Pro Xiaomi 3 bln — butuh akun pembeli (email|password|2FA)
   | "lahastore-sheerid"; // Gemini Student Pro — verifikasi SheerID
 
+/** Status stok produk — menentukan badge & apakah produk bisa dibeli. */
+export type StockState = "available" | "out_of_stock" | "coming_soon";
+
 export interface CatalogProduct {
   id: string; // slug internal, dipakai di URL & order
   name: string;
@@ -21,6 +37,10 @@ export interface CatalogProduct {
   supplier: SupplierId;
   supplierProductCode: string; // product_code (Sondev) / productId atau code (LahaStore)
   fulfillment: Fulfillment;
+  /** Kelompok tampilan di katalog ("Muse" / "AI Lain"). */
+  category: string;
+  /** Status stok — sumber kebenaran untuk badge & tombol beli. */
+  stockState: StockState;
   /** Harga jual ke pembeli (IDR). Dihitung dari harga grosir pakai formula docs (lihat pricing.ts). */
   retailPriceIdr: number;
   active: boolean;
@@ -29,9 +49,9 @@ export interface CatalogProduct {
   requiresTarget?: boolean;
   /** Label input target di checkout (mis. "Kode invite Muse"). */
   targetLabel?: string;
-  /** Belum bisa dibeli (mis. saldo supplier kosong) — tampil di katalog sebagai
-   *  "Segera hadir", tanpa alasan internal. Pembeli tidak perlu tahu soal
-   *  supplier/saldo; info itu hanya ada di /admin. */
+  /** DEPRECATED — turunan dari stockState ("coming_soon"). Dipakai sebagian
+   *  kode lama; logika baru harus membaca stockState. Selalu jaga selaras:
+   *  comingSoon === true hanya bila stockState === "coming_soon". */
   comingSoon?: boolean;
   /** Label kecil di kartu (mis. "Terlaris") — hanya yang relevan buat pembeli. */
   badge?: string;
@@ -58,6 +78,8 @@ export const CATALOG: CatalogProduct[] = [
     // hanya contoh di dokumentasi, BUKAN harga live.
     retailPriceIdr: 1500,
     active: true,
+    category: "Muse",
+    stockState: "available",
     badge: "Terlaris",
     unit: "per 1B token",
     features: [
@@ -82,6 +104,8 @@ export const CATALOG: CatalogProduct[] = [
     fulfillment: "lahastore-xiaomi3",
     retailPriceIdr: 35000,
     active: true,
+    category: "AI Lain",
+    stockState: "coming_soon",
     comingSoon: true,
     badge: "Hemat",
     unit: "per 3 bulan",
@@ -101,6 +125,8 @@ export const CATALOG: CatalogProduct[] = [
     fulfillment: "lahastore-sheerid",
     retailPriceIdr: 25000,
     active: true,
+    category: "AI Lain",
+    stockState: "coming_soon",
     comingSoon: true,
     unit: "per akun",
     features: [
@@ -119,4 +145,19 @@ export function getCatalogProduct(id: string): CatalogProduct {
 
 export function listActiveProducts(): CatalogProduct[] {
   return CATALOG.filter((p) => p.active);
+}
+
+/** Daftar kategori (urutan kemunculan pertama di katalog) dari produk aktif. */
+export function listCategories(): string[] {
+  const seen: string[] = [];
+  for (const p of listActiveProducts()) {
+    if (!seen.includes(p.category)) seen.push(p.category);
+  }
+  return seen;
+}
+
+/** Produk aktif per kategori; "Semua" = semua produk aktif. */
+export function listActiveProductsByCategory(category: string): CatalogProduct[] {
+  if (category === "Semua") return listActiveProducts();
+  return CATALOG.filter((p) => p.active && p.category === category);
 }

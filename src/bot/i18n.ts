@@ -2,6 +2,7 @@
 // Semua layar bot mengambil teks dari sini lewat t(lang).key —
 // tambah bahasa baru = tambah satu entri di STR.
 import type { Lang } from "../lib/wallet";
+import type { StockState } from "../lib/catalog";
 
 export type { Lang };
 
@@ -21,6 +22,8 @@ export interface Strings {
   language: string;
   backMenu: string;
   catalogTitle: string;
+  catalogPickCategory: string;
+  categoryAll: string;
   productDetail: (p: {
     name: string;
     desc: string;
@@ -28,9 +31,12 @@ export interface Strings {
     unit?: string;
     badge?: string;
     features: string[];
+    stock: string;
     targetNote?: string;
   }) => string;
   comingSoon: string;
+  outOfStock: string;
+  stockLabel: (state: StockState) => string;
   qtyPrompt: string;
   qtyCustomPrompt: string;
   qtyInvalid: string;
@@ -126,13 +132,18 @@ const id: Strings = {
   backMenu: "⬅️ Menu Utama",
   catalogTitle:
     "🛍️ <b>Katalog Produk</b>\n\nPilih produk untuk lihat detail & beli. Harga sudah termasuk semua biaya.",
+  catalogPickCategory: "🛍️ <b>Katalog Produk</b>\n\nPilih kategori dulu:",
+  categoryAll: "Semua",
   productDetail: (p) =>
     `${p.badge ? `🏷️ <b>${p.badge}</b>\n` : ""}<b>${p.name}</b>\n\n${p.desc}\n\n` +
     (p.features.length ? p.features.map((f) => `✅ ${f}`).join("\n") + "\n\n" : "") +
     `💰 Harga: <b>${rupiah(p.price)}</b>${p.unit ? ` ${p.unit}` : ""}\n` +
-    `📦 Stok: Tersedia\n` +
+    `📦 Stok: ${p.stock}\n` +
     (p.targetNote ? `\n🎯 ${p.targetNote}` : ""),
   comingSoon: "⏳ Segera hadir — produk ini belum bisa dibeli sekarang. Cek lagi nanti ya!",
+  outOfStock: "🔴 Stok habis — produk ini sedang kosong. Cek lagi nanti ya!",
+  stockLabel: (state) =>
+    state === "available" ? "Tersedia" : state === "out_of_stock" ? "Stok Habis" : "Segera Hadir",
   qtyPrompt: "Pilih jumlah yang mau dibeli:",
   qtyCustomPrompt:
     "Ketik jumlah yang mau dibeli (angka 1–30), atau /cancel untuk batal.",
@@ -276,13 +287,18 @@ const en: Strings = {
   backMenu: "⬅️ Main Menu",
   catalogTitle:
     "🛍️ <b>Product Catalog</b>\n\nPick a product to see details & buy. Prices are all-in.",
+  catalogPickCategory: "🛍️ <b>Product Catalog</b>\n\nPick a category first:",
+  categoryAll: "All",
   productDetail: (p) =>
     `${p.badge ? `🏷️ <b>${p.badge}</b>\n` : ""}<b>${p.name}</b>\n\n${p.desc}\n\n` +
     (p.features.length ? p.features.map((f) => `✅ ${f}`).join("\n") + "\n\n" : "") +
     `💰 Price: <b>${rupiah(p.price)}</b>${p.unit ? ` ${p.unit}` : ""}\n` +
-    `📦 Stock: Available\n` +
+    `📦 Stock: ${p.stock}\n` +
     (p.targetNote ? `\n🎯 ${p.targetNote}` : ""),
   comingSoon: "⏳ Coming soon — this product can't be bought yet. Check back later!",
+  outOfStock: "🔴 Out of stock — this product is currently unavailable. Check back later!",
+  stockLabel: (state) =>
+    state === "available" ? "Available" : state === "out_of_stock" ? "Out of stock" : "Coming soon",
   qtyPrompt: "Choose how many you want to buy:",
   qtyCustomPrompt: "Type the quantity (a number 1–30), or /cancel to abort.",
   qtyInvalid: "Quantity must be a number 1–30. Try again, or /cancel to abort.",

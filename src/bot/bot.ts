@@ -10,7 +10,11 @@
 // Jalankan: npm run bot (long polling; TELEGRAM_BOT_TOKEN di .env.local)
 // Token: @BotFather -> /newbot. Admin IDs: /getid atau @userinfobot.
 import { Bot, InlineKeyboard, type Context } from "grammy";
-import { getCatalogProduct, listActiveProducts } from "../lib/catalog";
+import {
+  getCatalogProduct,
+  listActiveProductsByCategory,
+  listCategories,
+} from "../lib/catalog";
 import {
   createStoreOrder,
   fulfillOrder,
@@ -56,6 +60,16 @@ import { getWebAppUrl } from "./menu-button";
 
 const ADMIN_USERNAME = "@Dimas0227";
 const QTY_PACKS = [1, 5, 10, 30];
+
+/** Shortcut command di menu "/" Telegram. /menu TIDAK didaftarkan (dobel
+ *  dengan /start) — handler /menu di bawah tetap ada buat yang mengetik
+ *  manual. Didaftarkan sekali saat startup (lihat createBot). */
+const BOT_COMMANDS: { command: string; description: string }[] = [
+  { command: "start", description: "Menu utama toko" },
+  { command: "products", description: "Lihat katalog produk" },
+  { command: "order", description: "Lacak pesanan" },
+  { command: "cancel", description: "Batalkan aksi" },
+];
 
 function adminIds(): string[] {
   return (process.env.TELEGRAM_ADMIN_IDS ?? "")
@@ -151,30 +165,62 @@ async function showMenu(ctx: Context): Promise<void> {
   if (id == null) return;
   const s = sOf(id);
   const stats = await getBuyerStats(`tg:${id}`);
-  await render(
-    ctx,
-    s.welcome(
-      ctx.from?.first_name ?? "teman",
-      stats.orderCount,
-      stats.totalSpentIdr,
-      referralCode(id),
-    ),
-    menuKeyboard(langOf(id)),
+  const text = s.welcome(
+    ctx.from?.first_name ?? "teman",
+    stats.orderCount,
+    stats.totalSpentIdr,
+    referralCode(id),
   );
+  const kb = menuKeyboard(langOf(id));
+  // Home dari command (/start, /menu): kirim banner sebagai foto.
+  // Dari tombol (callback) tetap edit teks — supaya chat tidak dipenuhi
+  // foto setiap kali kembali ke menu. Kalau env kosong / foto gagal,
+  // fallback ke balasan teks biasa — bot tidak boleh diam gara-gara banner.
+  if (!ctx.callbackQuery) {
+    const fileId = (process.env.BOT_BANNER_FILE_ID ?? "").trim();
+    if (fileId) {
+      try {
+        await ctx.replyWithPhoto(fileId, {
+          caption: text,
+          parse_mode: "HTML",
+          reply_markup: kb,
+        });
+        return;
+      } catch (err) {
+        console.error("[bot] kirim banner gagal, fallback teks:", err);
+      }
+    }
+  }
+  await render(ctx, text, kb);
 }
 
-async function showCatalog(ctx: Context): Promise<void> {
+/** Katalog: tanpa kategori = pilih kategori dulu; dengan kategori = daftar
+ *  produk kategori itu ("Semua" = semua produk). */
+async function showCatalog(ctx: Context, category?: string): Promise<void> {
   const id = uid(ctx);
   if (id == null) return;
   const s = sOf(id);
-  const kb = new InlineKeyboard();
-  for (const p of listActiveProducts()) {
-    kb.text(
-      `${p.comingSoon ? "⏳ " : ""}${p.name} — ${rupiah(p.retailPriceIdr)}${p.unit ? ` ${p.unit}` : ""}`,
-      `prod:${p.id}`,
-    ).row();
+  if (!category) {
+    const kb = new InlineKeyboard();
+    for (const cat of listCategories()) {
+      kb.text(cat, `cat:${cat}`).row();
+    }
+    kb.text(s.categoryAll, "cat:all").row();
+    kb.text(s.backMenu, "menu");
+    await render(ctx, s.catalogPickCategory, kb);
+    return;
   }
-  kb.text(s.backMenu, "menu");
+  const kb = new InlineKeyboard();
+  for (const p of listActiveProductsByCategory(category)) {
+    const emoji =
+      p.stockState === "available" ? "✅" : p.stockState === "out_of_stock" ? "🔴" : "⏳";
+    const suffix =
+      p.stockState === "available"
+        ? `${rupiah(p.retailPriceIdr)}${p.unit ? ` ${p.unit}` : ""}`
+        : s.stockLabel(p.stockState);
+    kb.text(`${emoji} ${p.name} — ${suffix}`, `prod:${p.id}`).row();
+  }
+  kb.text("⬅️ Kategori", "cat").text(s.backMenu, "menu");
   await render(ctx, s.catalogTitle, kb);
 }
 
@@ -184,8 +230,10 @@ async function showProduct(ctx: Context, productId: string): Promise<void> {
   const s = sOf(id);
   const product = getCatalogProduct(productId);
   const kb = new InlineKeyboard();
-  if (product.comingSoon) {
-    await render(ctx, `${product.name}\n\n${s.comingSoon}`, backToCatalogRow(langOf(id)));
+  if (product.stockState !== "available") {
+    const notice =
+      product.stockState === "out_of_stock" ? s.outOfStock : s.comingSoon;
+    await render(ctx, `${product.name}\n\n${notice}`, backToCatalogRow(langOf(id)));
     return;
   }
   if (product.id === "muse-token-1b") {
@@ -207,6 +255,7 @@ async function showProduct(ctx: Context, productId: string): Promise<void> {
       unit: product.unit,
       badge: product.badge,
       features: product.features ?? [],
+      stock: s.stockLabel(product.stockState),
       targetNote: product.requiresTarget
         ? `Butuh ${product.targetLabel ?? "target"} saat checkout.`
         : undefined,
@@ -269,8 +318,10 @@ async function beginCheckout(ctx: Context, productId: string, qty: number): Prom
   if (id == null) return;
   const s = sOf(id);
   const product = getCatalogProduct(productId);
-  if (product.comingSoon) {
-    await render(ctx, `${product.name}\n\n${s.comingSoon}`, backToCatalogRow(langOf(id)));
+  if (product.stockState !== "available") {
+    const notice =
+      product.stockState === "out_of_stock" ? s.outOfStock : s.comingSoon;
+    await render(ctx, `${product.name}\n\n${notice}`, backToCatalogRow(langOf(id)));
     return;
   }
   const session = getSession(id);
@@ -761,10 +812,10 @@ export function createBot(): Bot {
   bot.command("order", async (ctx) => {
     const id = uid(ctx);
     if (id == null) return;
-    const s = sOf(id);
     const orderId = (ctx.match ?? "").trim();
     if (!orderId) {
-      await ctx.reply(s.orderUsage);
+      // Tanpa ID = lacak order: tampilkan daftar pesanan saya.
+      await showMyOrders(ctx);
       return;
     }
     await showOrderDetail(ctx, orderId);
@@ -891,6 +942,12 @@ export function createBot(): Bot {
   bot.callbackQuery("cat", async (ctx) => {
     await answerCb(ctx);
     await showCatalog(ctx);
+  });
+
+  bot.callbackQuery(/^cat:(.+)$/, async (ctx) => {
+    await answerCb(ctx);
+    const cat = ctx.match[1] === "all" ? "Semua" : ctx.match[1];
+    await showCatalog(ctx, cat);
   });
 
   bot.callbackQuery(/^prod:(.+)$/, async (ctx) => {
@@ -1108,6 +1165,13 @@ export function createBot(): Bot {
     // --- Target produk on-demand ---
     if (awaiting.kind === "target") {
       const draft = awaiting.draft;
+      if (!text) {
+        // Pesan kosong (cuma spasi) bukan target yang valid — minta ulang,
+        // jangan lanjut ke promo dengan target kosong (Sondev menolak 400).
+        const product = getCatalogProduct(draft.productId);
+        await ctx.reply(s.targetPrompt(product.targetLabel ?? "Target"));
+        return;
+      }
       session.awaiting = undefined;
       // Target disimpan di draft; order dibuat saat bayar (createStoreOrder
       // menerima target) — tidak ada order yang dibuat sebelum bayar di v2.
@@ -1183,6 +1247,17 @@ export function createBot(): Bot {
       }
       return;
     }
+  });
+
+  // Daftarkan shortcut command (menu "/" di Telegram) sekali saat start.
+  // Kegagalan tidak boleh mematikan bot (mis. jaringan sempat putus) —
+  // bot tetap jalan dengan handler command-nya; daftar command bisa
+  // didaftarkan ulang di restart berikutnya.
+  void bot.api.setMyCommands(BOT_COMMANDS).catch((err: unknown) => {
+    console.error(
+      "[bot] setMyCommands gagal:",
+      err instanceof Error ? err.message : String(err),
+    );
   });
 
   return bot;

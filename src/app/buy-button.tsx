@@ -9,11 +9,14 @@ export function BuyButton({
   requiresTarget,
   targetLabel,
   disabled,
+  disabledLabel,
 }: {
   productId: string;
   requiresTarget?: boolean;
   targetLabel?: string;
   disabled?: boolean;
+  /** Teks tombol saat disabled (mis. "Stok Habis" / "Segera hadir"). */
+  disabledLabel?: string;
 }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -93,7 +96,7 @@ export function BuyButton({
           boxShadow: disabled ? "none" : "0 4px 16px #7c3aed66",
         }}
       >
-        {disabled ? "Segera hadir" : busy ? "Memproses..." : "Beli Sekarang"}
+        {disabled ? (disabledLabel ?? "Segera hadir") : busy ? "Memproses..." : "Beli Sekarang"}
       </button>
       {error && <p style={{ color: "#f87171", fontSize: 13 }}>{error}</p>}
     </>

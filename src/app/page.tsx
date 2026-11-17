@@ -1,13 +1,48 @@
-import { listActiveProducts } from "@/lib/catalog";
+import {
+  listActiveProductsByCategory,
+  listCategories,
+} from "@/lib/catalog";
 import { BuyButton } from "./buy-button";
 
 const rupiah = (n: number) => `Rp${n.toLocaleString("id-ID")}`;
 
+const STOCK_BADGE: Record<
+  string,
+  { label: string; background: string; color: string; border: string }
+> = {
+  available: {
+    label: "Tersedia",
+    background: "#059669",
+    color: "#ffffff",
+    border: "1px solid #059669",
+  },
+  out_of_stock: {
+    label: "Stok Habis",
+    background: "#dc2626",
+    color: "#ffffff",
+    border: "1px solid #dc2626",
+  },
+  coming_soon: {
+    label: "Segera Hadir",
+    background: "#14092b",
+    color: "#e8c874",
+    border: "1px solid #d9b45b",
+  },
+};
+
 // Halaman pembeli = katalog saja. Pembeli tidak perlu tahu soal supplier,
 // saldo grosir, atau maintenance — info internal itu hanya ada di /admin.
-// Produk yang belum bisa dijual tampil sebagai "Segera hadir" (tanpa alasan).
-export default function Home() {
-  const products = listActiveProducts();
+// Produk yang belum bisa dijual tampil dengan badge stoknya (tanpa alasan).
+export default async function Home({
+  searchParams,
+}: {
+  searchParams: Promise<{ cat?: string }>;
+}) {
+  const { cat } = await searchParams;
+  const categories = listCategories();
+  const activeCat =
+    cat && (cat === "Semua" || categories.includes(cat)) ? cat : "Semua";
+  const products = listActiveProductsByCategory(activeCat);
 
   return (
     <>
@@ -29,10 +64,42 @@ export default function Home() {
       >
         Produk Digital
       </h1>
-      <p style={{ color: "#b3a1e6", marginTop: 0, marginBottom: 24 }}>
+      <p style={{ color: "#b3a1e6", marginTop: 0, marginBottom: 16 }}>
         Produk digital instan — bayar lewat QRIS/e-wallet/VA, order langsung
         diproses dan hasilnya dikirim ke kamu.
       </p>
+
+      {/* Filter kategori */}
+      <div
+        style={{
+          display: "flex",
+          gap: 8,
+          flexWrap: "wrap",
+          marginBottom: 20,
+        }}
+      >
+        {["Semua", ...categories].map((c) => {
+          const active = c === activeCat;
+          return (
+            <a
+              key={c}
+              href={c === "Semua" ? "/" : `/?cat=${encodeURIComponent(c)}`}
+              style={{
+                color: active ? "#fff" : "#b3a1e6",
+                fontSize: 13,
+                fontWeight: 700,
+                background: active ? "#7c3aed" : "transparent",
+                border: `1px solid ${active ? "#7c3aed" : "#6d28d9"}`,
+                borderRadius: 999,
+                padding: "6px 14px",
+                textDecoration: "none",
+              }}
+            >
+              {c}
+            </a>
+          );
+        })}
+      </div>
 
       <ul
         style={{
@@ -46,6 +113,7 @@ export default function Home() {
         {products.map((p) => {
           const accent = p.accent ?? "#7c3aed";
           const isToken = p.id.startsWith("muse-");
+          const stock = STOCK_BADGE[p.stockState];
           return (
             <li
               key={p.id}
@@ -57,7 +125,7 @@ export default function Home() {
                 overflow: "hidden",
                 display: "flex",
                 flexDirection: "column",
-                opacity: p.comingSoon ? 0.85 : 1,
+                opacity: p.stockState !== "available" ? 0.85 : 1,
               }}
             >
               {/* Visual atas: gradient aksen + ikon produk */}
@@ -132,24 +200,22 @@ export default function Home() {
                     {p.badge}
                   </span>
                 )}
-                {p.comingSoon && (
-                  <span
-                    style={{
-                      position: "absolute",
-                      top: 10,
-                      left: 10,
-                      background: "#14092b",
-                      color: "#e8c874",
-                      fontSize: 12,
-                      fontWeight: 700,
-                      border: "1px solid #d9b45b",
-                      borderRadius: 999,
-                      padding: "3px 10px",
-                    }}
-                  >
-                    Segera hadir
-                  </span>
-                )}
+                <span
+                  style={{
+                    position: "absolute",
+                    top: 10,
+                    left: 10,
+                    background: stock.background,
+                    color: stock.color,
+                    fontSize: 12,
+                    fontWeight: 700,
+                    border: stock.border,
+                    borderRadius: 999,
+                    padding: "3px 10px",
+                  }}
+                >
+                  {stock.label}
+                </span>
               </div>
 
               <div
@@ -204,7 +270,8 @@ export default function Home() {
                     productId={p.id}
                     requiresTarget={p.requiresTarget}
                     targetLabel={p.targetLabel}
-                    disabled={p.comingSoon}
+                    disabled={p.stockState !== "available"}
+                    disabledLabel={stock.label}
                   />
                 </div>
               </div>

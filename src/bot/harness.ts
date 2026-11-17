@@ -46,6 +46,13 @@ const SONDEV_PRODUCTS = {
     ],
   },
 };
+// --- Stub kontrol skenario (diubah dari main() untuk verifikasi) ---
+const stubControl = {
+  sondevBalanceIdr: 100000, // saldo IDR yang dikembalikan GET /profile
+  sondevFail: false, // true = semua endpoint Sondev melempar (simulasi API down)
+  sondevCreateCalls: 0, // jumlah POST /orders/create yang diterima
+};
+
 function fakeResponse(body: unknown): Response {
   return {
     ok: true,
@@ -61,6 +68,7 @@ interface Call {
   text?: string;
   keyboard?: unknown;
   data?: unknown;
+  photo?: string;
 }
 const calls: Call[] = [];
 let midCounter = 1000;
@@ -92,6 +100,32 @@ let midCounter = 1000;
           date: Math.floor(Date.now() / 1000),
         },
       });
+    }
+    if (method === "sendPhoto") {
+      // file_id "BAD-FILE-ID" mensimulasikan foto yang dihapus / tidak valid.
+      if (body.photo === "BAD-FILE-ID") {
+        throw new Error("HARNESS: sendPhoto file_id tidak valid");
+      }
+      calls.push({
+        method,
+        chatId,
+        photo: typeof body.photo === "string" ? body.photo : undefined,
+        text: typeof body.caption === "string" ? body.caption : undefined,
+        keyboard: body.reply_markup,
+      });
+      return fakeResponse({
+        ok: true,
+        result: {
+          message_id: ++midCounter,
+          chat: { id: chatId, type: "private" },
+          caption: body.caption,
+          date: Math.floor(Date.now() / 1000),
+        },
+      });
+    }
+    if (method === "setMyCommands") {
+      calls.push({ method, data: body.commands });
+      return fakeResponse({ ok: true, result: true });
     }
     if (method === "editMessageText") {
       calls.push({
@@ -146,19 +180,63 @@ let midCounter = 1000;
       gross_amount: "25000",
     });
   }
+  // Refund Midtrans: order yang id-nya mengandung NOREFUND ditolak (simulasi
+  // refund gagal) — dipakai S27 untuk jalur "refund manual".
+  if (url.includes("api.sandbox.midtrans.com/v2/") && url.endsWith("/refund")) {
+    if (url.includes("NOREFUND")) {
+      throw new Error("HARNESS: refund ditolak");
+    }
+    return fakeResponse({ status_code: "200", transaction_status: "refund" });
+  }
   if (url.includes("api.sondevs.tech/api/v1/orders/create")) {
+    stubControl.sondevCreateCalls += 1;
+    if (stubControl.sondevFail) {
+      throw new Error("HARNESS: Sondev orders down");
+    }
+    // Order dengan ref_id UD-FAIL-* gagal di supplier (simulasi fulfillment
+    // gagal) — dipakai S27 untuk jalur refund otomatis.
+    let reqBody: Record<string, unknown> = {};
+    try {
+      reqBody = JSON.parse(String(init?.body ?? "{}")) as Record<
+        string,
+        unknown
+      >;
+    } catch {
+      reqBody = {};
+    }
+    const refId = String(reqBody.ref_id ?? "");
+    if (refId.startsWith("UD-FAIL")) {
+      return fakeResponse({
+        status: "success",
+        request_id: "test-req-fail",
+        data: {
+          order: {
+            ref_id: refId,
+            status: "FAILED",
+            delivery_status: "FAILED",
+            delivered_data: { items: [] },
+          },
+        },
+      });
+    }
     return fakeResponse(SONDEV_ORDER);
   }
   if (/api\.sondevs\.tech\/api\/v1\/orders\/[^/]+$/.test(url)) {
     return fakeResponse(SONDEV_ORDER);
   }
   if (url.includes("api.sondevs.tech/api/v1/products")) {
+    if (stubControl.sondevFail) {
+      throw new Error("HARNESS: Sondev products down");
+    }
     return fakeResponse(SONDEV_PRODUCTS);
   }
   if (url.includes("api.sondevs.tech/api/v1/profile")) {
+    if (stubControl.sondevFail) {
+      throw new Error("HARNESS: Sondev profile down");
+    }
     return fakeResponse({
       status: "success",
-      data: { balance_idr: 100000, balance_usdt: 0 },
+      data: { balance_idr: stubControl.sondevBalanceIdr, balance_usdt: 0 },
     });
   }
   throw new Error(`HARNESS: fetch tak terduga: ${url}`);
@@ -195,6 +273,23 @@ async function main(): Promise<void> {
   // bot.api ASLI dipakai — kirimannya direkam oleh fetch stub di atas
   // (lebih setia: menguji jalur grammY + fixedFetch yang sebenarnya).
   // botInfo wajib diisi manual karena handleUpdate butuh this.me.
+
+  // setMyCommands didaftarkan fire-and-forget di createBot — tunggu sebentar.
+  for (let i = 0; i < 50 && !calls.some((c) => c.method === "setMyCommands"); i++) {
+    await new Promise((r) => setTimeout(r, 20));
+  }
+  const cmdCall = calls.find((c) => c.method === "setMyCommands");
+  const cmdList = (cmdCall?.data as { command: string }[] | undefined) ?? [];
+  check(
+    "setMyCommands dipanggil saat startup (start/products/order/cancel, tanpa /menu)",
+    cmdList.length === 4 &&
+      cmdList.some((c) => c.command === "start") &&
+      cmdList.some((c) => c.command === "products") &&
+      cmdList.some((c) => c.command === "order") &&
+      cmdList.some((c) => c.command === "cancel") &&
+      !cmdList.some((c) => c.command === "menu"),
+    JSON.stringify(cmdList),
+  );
 
   // ---- pembangun update palsu ----
   const admin = { id: 807719771, first_name: "Dimas", username: "Dimas0227", is_bot: false };
@@ -245,6 +340,21 @@ async function main(): Promise<void> {
     calls.some(
       (c) => (!method || c.method === method) && (c.text ?? "").includes(needle),
     );
+  // Cari teks di kiriman SEJAK indeks tertentu — dipakai saat satu handler
+  // mengirim 2 pesan berurutan (mis. promoInvalid lalu ringkasan order),
+  // supaya assertion tidak menangkap pesan kedua.
+  const textSince = (
+    fromIndex: number,
+    needle: string,
+    method?: string,
+  ): boolean =>
+    calls
+      .slice(fromIndex)
+      .some(
+        (c) =>
+          (!method || c.method === method) &&
+          (c.text ?? "").includes(needle),
+      );
   const kbText = (call?: Call): string => JSON.stringify(call?.keyboard ?? "");
   const lastCall = (method: string): Call | undefined => {
     for (let i = calls.length - 1; i >= 0; i--) {
@@ -286,7 +396,16 @@ async function main(): Promise<void> {
   err = await send(cbUpdate(buyer, "cat"));
   check("tombol Katalog tidak throw", err === null, err ?? undefined);
   check(
-    "katalog menampilkan Muse (tombol)",
+    "katalog menampilkan pilih kategori (Muse / AI Lain / Semua)",
+    kbText(lastCall("editMessageText")).includes("Muse") &&
+      kbText(lastCall("editMessageText")).includes("AI Lain") &&
+      kbText(lastCall("editMessageText")).includes("Semua"),
+    kbText(lastCall("editMessageText")).slice(0, 200),
+  );
+  err = await send(cbUpdate(buyer, "cat:all"));
+  check("pilih kategori Semua tidak throw", err === null, err ?? undefined);
+  check(
+    "katalog Semua menampilkan Muse (tombol)",
     kbText(lastCall("editMessageText")).includes("Muse AI Token"),
     kbText(lastCall("editMessageText")).slice(0, 150),
   );
@@ -513,12 +632,19 @@ async function main(): Promise<void> {
   // ================= S14: legacy /products /order /fulfill =================
   err = await send(textUpdate(buyer, "/products"));
   check(
-    "/products tetap jalan",
-    err === null && kbText(lastCall("sendMessage")).includes("Muse AI Token"),
+    "/products menampilkan pilih kategori",
+    err === null && kbText(lastCall("sendMessage")).includes("AI Lain"),
     err ?? kbText(lastCall("sendMessage")).slice(0, 120),
   );
   err = await send(textUpdate(buyer, `/order ${myOrderId}`));
   check("/order tetap jalan", err === null && lastText("sendMessage").includes(myOrderId), err ?? undefined);
+  err = await send(textUpdate(buyer, "/order"));
+  check("/order tanpa ID tidak throw", err === null, err ?? undefined);
+  check(
+    "/order tanpa ID menampilkan daftar pesanan saya",
+    kbText(lastCall("sendMessage")).includes(myOrderId),
+    kbText(lastCall("sendMessage")).slice(0, 200),
+  );
   const { createStoreOrder } = await import("../lib/orders");
   const legacyOrder = await createStoreOrder({
     catalogProductId: "muse-token-1b",
@@ -598,6 +724,517 @@ async function main(): Promise<void> {
     menuButtonThrew = true;
   }
   check("setWebAppMenuButton menolak sebelum ada domain publik", menuButtonThrew);
+
+  // ================= S18: banner di /start & /menu =================
+  process.env.BOT_BANNER_FILE_ID = "TEST-BANNER-FILE-ID";
+  err = await send(textUpdate(buyer, "/start"));
+  check("/start banner tidak throw", err === null, err ?? undefined);
+  const startPhoto = lastCall("sendPhoto");
+  check(
+    "/start mengirim banner (file_id benar + caption welcome + keyboard menu)",
+    startPhoto?.photo === "TEST-BANNER-FILE-ID" &&
+      (startPhoto?.text ?? "").includes("Welcome to Unicodes Digital, Budi") &&
+      kbText(startPhoto).includes("Katalog"),
+    JSON.stringify({
+      photo: startPhoto?.photo,
+      caption: startPhoto?.text?.slice(0, 80),
+    }),
+  );
+  err = await send(textUpdate(buyer, "/menu"));
+  check(
+    "/menu mengirim banner juga",
+    lastCall("sendPhoto")?.photo === "TEST-BANNER-FILE-ID",
+    JSON.stringify(lastCall("sendPhoto")),
+  );
+  // file_id tidak valid -> fallback teks, bot tidak diam.
+  process.env.BOT_BANNER_FILE_ID = "BAD-FILE-ID";
+  const photosBeforeBad = calls.filter((c) => c.method === "sendPhoto").length;
+  err = await send(textUpdate(buyer, "/start"));
+  check("/start file_id rusak tidak throw", err === null, err ?? undefined);
+  check(
+    "/start file_id rusak fallback ke teks welcome (tanpa foto baru)",
+    lastText("sendMessage").includes("Welcome to Unicodes Digital, Budi") &&
+      calls.filter((c) => c.method === "sendPhoto").length === photosBeforeBad,
+    lastText("sendMessage").slice(0, 120),
+  );
+  // env kosong -> teks biasa.
+  delete process.env.BOT_BANNER_FILE_ID;
+  err = await send(textUpdate(buyer, "/start"));
+  check(
+    "/start tanpa banner env fallback teks",
+    err === null &&
+      lastText("sendMessage").includes("Welcome to Unicodes Digital, Budi"),
+    err ?? lastText("sendMessage").slice(0, 120),
+  );
+
+  // ================= S19: kategori + stok =================
+  err = await send(cbUpdate(buyer, "cat:Muse"));
+  check(
+    "kategori Muse hanya menampilkan Muse",
+    kbText(lastCall("editMessageText")).includes("Muse AI Token") &&
+      !kbText(lastCall("editMessageText")).includes("Gemini"),
+    kbText(lastCall("editMessageText")).slice(0, 200),
+  );
+  err = await send(cbUpdate(buyer, "cat:AI Lain"));
+  check(
+    "kategori AI Lain hanya menampilkan Gemini",
+    kbText(lastCall("editMessageText")).includes("Gemini") &&
+      !kbText(lastCall("editMessageText")).includes("Muse AI Token"),
+    kbText(lastCall("editMessageText")).slice(0, 200),
+  );
+  err = await send(cbUpdate(buyer, "cat:all"));
+  check(
+    "kategori Semua menampilkan badge Segera Hadir untuk Gemini",
+    kbText(lastCall("editMessageText")).includes("Segera Hadir") &&
+      kbText(lastCall("editMessageText")).includes("Muse AI Token"),
+    kbText(lastCall("editMessageText")).slice(0, 200),
+  );
+  // Produk coming_soon tidak bisa dibeli.
+  err = await send(cbUpdate(buyer, "prod:gemini-xiaomi-3bln"));
+  check(
+    "detail Gemini coming_soon tanpa tombol beli",
+    lastText("editMessageText").includes("Segera hadir") &&
+      !kbText(lastCall("editMessageText")).includes("qty:"),
+    kbText(lastCall("editMessageText")).slice(0, 200),
+  );
+  // Produk out_of_stock: ubah sementara stok Muse (seed tidak punya produk
+  // out_of_stock — jangan tambah produk palsu ke katalog asli).
+  const { CATALOG } = await import("../lib/catalog");
+  const muse = CATALOG.find((p) => p.id === "muse-token-1b");
+  const ordersBefore = (
+    getDb().prepare("SELECT COUNT(*) AS n FROM store_orders").get() as { n: number }
+  ).n;
+  if (muse) muse.stockState = "out_of_stock";
+  try {
+    err = await send(cbUpdate(buyer, "cat:all"));
+    check(
+      "katalog menampilkan badge Stok Habis",
+      kbText(lastCall("editMessageText")).includes("Stok Habis"),
+      kbText(lastCall("editMessageText")).slice(0, 200),
+    );
+    err = await send(cbUpdate(buyer, "prod:muse-token-1b"));
+    check(
+      "detail out_of_stock ada pesan Stok Habis tanpa tombol beli",
+      lastText("editMessageText").includes("Stok habis") &&
+        !kbText(lastCall("editMessageText")).includes("qty:"),
+      lastText("editMessageText").slice(0, 150),
+    );
+    err = await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
+    check(
+      "checkout out_of_stock ditolak (pesan stok, tanpa order baru)",
+      lastText("editMessageText").includes("Stok habis") &&
+        (
+          getDb().prepare("SELECT COUNT(*) AS n FROM store_orders").get() as {
+            n: number;
+          }
+        ).n === ordersBefore,
+      lastText("editMessageText").slice(0, 150),
+    );
+  } finally {
+    if (muse) muse.stockState = "available";
+  }
+
+  // ================= S20: qty custom, target kosong, saldo kurang, Snap =================
+  // Qty custom: 0 / 31 / "abc" / -5 ditolak; 7 diterima.
+  await send(cbUpdate(buyer, "cat:all"));
+  await send(cbUpdate(buyer, "prod:muse-token-1b"));
+  await send(cbUpdate(buyer, "qtycustom:muse-token-1b"));
+  for (const bad of ["0", "31", "abc", "-5"]) {
+    err = await send(textUpdate(buyer, bad));
+    check(
+      `qty custom "${bad}" ditolak`,
+      err === null && lastText("sendMessage").includes("Jumlah harus angka"),
+      lastText("sendMessage").slice(0, 100),
+    );
+  }
+  err = await send(textUpdate(buyer, "7"));
+  check(
+    "qty custom 7 diterima (minta target)",
+    err === null && lastText("sendMessage").includes("Kode invite"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  // Target kosong (cuma spasi) ditolak — minta ulang, tidak lanjut ke promo.
+  err = await send(textUpdate(buyer, "   "));
+  check(
+    "target kosong ditolak (minta ulang)",
+    err === null && lastText("sendMessage").includes("Kode invite"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  err = await send(textUpdate(buyer, "https://muse.ai/invite/123"));
+  await send(cbUpdate(buyer, "promo_skip"));
+  // Paksa saldo rendah supaya bayar saldo pasti kurang (total 7 x 1500).
+  getDb()
+    .prepare("UPDATE wallets SET balance_idr = ? WHERE tg_id = ?")
+    .run(1000, buyer.id);
+  err = await send(cbUpdate(buyer, "pay_wallet"));
+  check(
+    "bayar saldo kurang: pesan jelas + tawaran isi saldo",
+    err === null &&
+      lastText("editMessageText").includes("tidak cukup") &&
+      lastText("editMessageText").includes("Isi saldo"),
+    lastText("editMessageText").slice(0, 200),
+  );
+  // Bayar via Snap (mock) -> URL Snap dihasilkan tanpa charge beneran.
+  err = await send(cbUpdate(buyer, "pay_snap"));
+  check(
+    "bayar Snap menghasilkan URL Snap mock",
+    err === null &&
+      lastText("editMessageText").includes("https://snap.test/pay/TEST"),
+    lastText("editMessageText").slice(0, 200),
+  );
+
+  // ================= S21: top-up custom =================
+  err = await send(cbUpdate(buyer, "topup"));
+  err = await send(cbUpdate(buyer, "topup_custom"));
+  err = await send(textUpdate(buyer, "5000"));
+  check(
+    "top-up custom di bawah 10000 ditolak",
+    err === null && lastText("sendMessage").includes("minimal 10000"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  err = await send(textUpdate(buyer, "abc"));
+  check(
+    "top-up custom bukan angka ditolak",
+    err === null && lastText("sendMessage").includes("minimal 10000"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  err = await send(textUpdate(buyer, "20000"));
+  check(
+    "top-up custom 20000 diterima (link Snap)",
+    // startTopup dipanggil dari handler pesan teks -> render() mengirim
+    // sendMessage baru (bukan editMessageText seperti dari callback).
+    err === null &&
+      lastText("sendMessage").includes("https://snap.test/pay/TEST"),
+    lastText("sendMessage").slice(0, 200),
+  );
+
+  // ================= S22: promo tidak ditemukan / kedaluwarsa / habis =================
+  const { createPromoCode, redeemPromo } = await import("../lib/wallet");
+  createPromoCode({
+    code: "EXPIRED1",
+    kind: "percent",
+    value: 10,
+    validDays: -1,
+    createdBy: "harness",
+  });
+  createPromoCode({
+    code: "HABIS1",
+    kind: "fixed",
+    value: 1000,
+    maxUses: 1,
+    createdBy: "harness",
+  });
+  redeemPromo({ code: "HABIS1", tgId: 333, orderId: "UD-HABIS-1", discountIdr: 1000 });
+  async function checkoutToPromo(): Promise<void> {
+    await send(cbUpdate(buyer, "cat:all"));
+    await send(cbUpdate(buyer, "prod:muse-token-1b"));
+    await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
+    await send(textUpdate(buyer, "https://muse.ai/invite/123"));
+    await send(cbUpdate(buyer, "promo_enter"));
+  }
+  await checkoutToPromo();
+  let mark = calls.length;
+  err = await send(textUpdate(buyer, "TIDAKADA"));
+  check(
+    "promo tidak ditemukan ditolak",
+    // Handler promo mengirim 2 pesan (promoInvalid lalu ringkasan order) —
+    // cari di kiriman sejak update ini, bukan pesan terakhir saja.
+    err === null && textSince(mark, "tidak ditemukan", "sendMessage"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  await checkoutToPromo();
+  mark = calls.length;
+  err = await send(textUpdate(buyer, "EXPIRED1"));
+  check(
+    "promo kedaluwarsa ditolak",
+    err === null && textSince(mark, "kedaluwarsa", "sendMessage"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  await checkoutToPromo();
+  mark = calls.length;
+  err = await send(textUpdate(buyer, "HABIS1"));
+  check(
+    "promo habis kuota ditolak",
+    err === null && textSince(mark, "habis", "sendMessage"),
+    lastText("sendMessage").slice(0, 120),
+  );
+
+  // ================= S23: order tidak ada, blokir admin =================
+  err = await send(textUpdate(buyer, "/order UD-TIDAKADA"));
+  check(
+    "/order id tidak ada -> pesan tidak ditemukan",
+    err === null && lastText("sendMessage").includes("tidak ditemukan"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  err = await send(textUpdate(buyer, "/fulfill UD-XXXX"));
+  check(
+    "non-admin /fulfill diblokir",
+    err === null && lastText("sendMessage").includes("khusus admin"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  err = await send(textUpdate(buyer, "/promo_list"));
+  check(
+    "non-admin /promo_list diblokir",
+    err === null && lastText("sendMessage").includes("khusus admin"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  err = await send(textUpdate(admin, "/promo_add"));
+  check(
+    "/promo_add tanpa argumen menampilkan cara pakai",
+    err === null && lastText("sendMessage").includes("Pakai: /promo_add"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  err = await send(textUpdate(admin, "/promo_add JELEK salah 10"));
+  check(
+    "/promo_add kind salah menampilkan cara pakai",
+    err === null && lastText("sendMessage").includes("Pakai: /promo_add"),
+    lastText("sendMessage").slice(0, 120),
+  );
+
+  // ================= S24: referral diri sendiri + bahasa EN =================
+  const invitedBefore = getReferralStats(111).invited;
+  err = await send(textUpdate(buyer, "/start ref_UD-111"));
+  check(
+    "referral diri sendiri diblokir",
+    err === null && getReferralStats(111).invited === invitedBefore,
+    `invited ${invitedBefore} -> ${getReferralStats(111).invited}`,
+  );
+  await send(cbUpdate(buyer, "lang"));
+  await send(cbUpdate(buyer, "lang:en"));
+  err = await send(textUpdate(buyer, "/start"));
+  check(
+    "menu EN: welcome + tombol Inggris",
+    err === null &&
+      lastText("sendMessage").includes("Welcome to Unicodes Digital") &&
+      kbText(lastCall("sendMessage")).includes("Product Catalog") &&
+      kbText(lastCall("sendMessage")).includes("My Balance"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  await send(cbUpdate(buyer, "lang:id"));
+
+  // ================= S25: webhook Midtrans via route (signature + duplikat) =================
+  const { createHash } = await import("node:crypto");
+  const { POST: webhookPost } = await import(
+    "../app/api/webhooks/midtrans/route"
+  );
+  const { createTopup } = await import("../lib/wallet");
+  const signMidtrans = (
+    orderId: string,
+    statusCode: string,
+    gross: string,
+  ): string =>
+    createHash("sha512")
+      .update(`${orderId}${statusCode}${gross}test-server-key`)
+      .digest("hex");
+  const topup2 = createTopup(111, 30000);
+  const goodBody = {
+    order_id: topup2.id,
+    status_code: "200",
+    gross_amount: "30000",
+    signature_key: signMidtrans(topup2.id, "200", "30000"),
+    transaction_status: "settlement",
+  };
+  const webhookReq = (body: unknown): Request =>
+    new Request("http://x/api/webhooks/midtrans", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const balBeforeWebhook = getWallet(111).balanceIdr;
+  let wres = await webhookPost(webhookReq(goodBody));
+  check(
+    "webhook signature benar -> 200 + saldo masuk sekali",
+    wres.status === 200 && getWallet(111).balanceIdr === balBeforeWebhook + 30000,
+    `status ${wres.status}, saldo ${getWallet(111).balanceIdr}`,
+  );
+  wres = await webhookPost(webhookReq(goodBody));
+  check(
+    "webhook top-up duplikat -> tetap 200, saldo tidak dobel",
+    wres.status === 200 && getWallet(111).balanceIdr === balBeforeWebhook + 30000,
+    `status ${wres.status}, saldo ${getWallet(111).balanceIdr}`,
+  );
+  const badBody = { ...goodBody, signature_key: "0".repeat(128) };
+  wres = await webhookPost(webhookReq(badBody));
+  check(
+    "webhook signature salah -> 401, saldo tidak berubah",
+    wres.status === 401 && getWallet(111).balanceIdr === balBeforeWebhook + 30000,
+    `status ${wres.status}`,
+  );
+
+  // ================= S26: webhook duplikat order produk =================
+  // (createStoreOrder sudah diimpor di S14 — pakai ulang di sini.)
+  const dupOrder = await createStoreOrder({
+    catalogProductId: "muse-token-1b",
+    quantity: 1,
+    buyerRef: "tg:111",
+    target: "https://muse.ai/invite/123",
+  });
+  const r1 = await handleMidtransNotification({
+    orderId: dupOrder.id,
+    transactionStatus: "settlement",
+  });
+  check("webhook order pertama handled", r1.handled, r1.reason);
+  // Tunggu fulfill background (mock Sondev cepat) selesai.
+  for (let i = 0; i < 50; i++) {
+    const o = await getStoreOrder(dupOrder.id);
+    if (o?.status === "delivered") break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  check(
+    "order webhook terkirim delivered",
+    (await getStoreOrder(dupOrder.id))?.status === "delivered",
+    (await getStoreOrder(dupOrder.id))?.status ?? "?",
+  );
+  const createsAfterFirst = stubControl.sondevCreateCalls;
+  const r2 = await handleMidtransNotification({
+    orderId: dupOrder.id,
+    transactionStatus: "settlement",
+  });
+  check("webhook order duplikat handled", r2.handled, r2.reason);
+  await new Promise((r) => setTimeout(r, 300));
+  check(
+    "webhook duplikat tidak membuat order Sondev kedua",
+    stubControl.sondevCreateCalls === createsAfterFirst,
+    `creates ${createsAfterFirst} -> ${stubControl.sondevCreateCalls}`,
+  );
+
+  // ================= S27: fulfillment gagal -> refund =================
+  const { fulfillOrder, markPaid, setOrderPaidVia } = await import(
+    "../lib/orders"
+  );
+  const { debitWallet: debitWalletLib } = await import("../lib/wallet");
+  // (a) Bayar saldo -> refund kembali ke dompet.
+  creditWallet({ tgId: 111, amountIdr: 50000, kind: "topup", ref: "TEST-S27", note: "test" });
+  const balA = getWallet(111).balanceIdr;
+  const failWallet = await createStoreOrder({
+    id: "UD-FAIL-1",
+    catalogProductId: "muse-token-1b",
+    quantity: 1,
+    buyerRef: "tg:111",
+    target: "https://muse.ai/invite/123",
+  });
+  const debited = debitWalletLib({ tgId: 111, amountIdr: 1500, kind: "purchase", ref: failWallet.id, note: "test" });
+  check("setup S27a: debit saldo berhasil", debited !== null);
+  await setOrderPaidVia(failWallet.id, "wallet");
+  await markPaid(failWallet.id);
+  const doneA = await fulfillOrder(failWallet.id);
+  check(
+    "fulfill gagal (saldo): status refunded",
+    doneA.status === "refunded",
+    doneA.status,
+  );
+  check(
+    "fulfill gagal (saldo): saldo kembali utuh",
+    getWallet(111).balanceIdr === balA,
+    `saldo ${getWallet(111).balanceIdr} vs ${balA}`,
+  );
+  // (b) Bayar Snap -> refund Midtrans (mock) -> refunded.
+  const failSnap = await createStoreOrder({
+    id: "UD-FAIL-2",
+    catalogProductId: "muse-token-1b",
+    quantity: 1,
+    buyerRef: "tg:111",
+    target: "https://muse.ai/invite/123",
+  });
+  await markPaid(failSnap.id);
+  const doneB = await fulfillOrder(failSnap.id);
+  check(
+    "fulfill gagal (Snap): status refunded",
+    doneB.status === "refunded",
+    doneB.status,
+  );
+  // (c) Bayar Snap + refund ditolak -> tetap failed + catatan manual.
+  const failNoRefund = await createStoreOrder({
+    id: "UD-FAIL-NOREFUND",
+    catalogProductId: "muse-token-1b",
+    quantity: 1,
+    buyerRef: "tg:111",
+    target: "https://muse.ai/invite/123",
+  });
+  await markPaid(failNoRefund.id);
+  const doneC = await fulfillOrder(failNoRefund.id);
+  check(
+    "fulfill gagal + refund ditolak: status tetap failed",
+    doneC.status === "failed",
+    doneC.status,
+  );
+  check(
+    "fulfill gagal + refund ditolak: ada catatan refund manual",
+    (doneC.error ?? "").includes("manual"),
+    doneC.error ?? "",
+  );
+
+  // ================= S28: cek saldo supplier via route order =================
+  const { POST: orderPost } = await import("../app/api/orders/route");
+  const orderReq = (body: unknown): Request =>
+    new Request("http://x/api/orders", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const orderBody = {
+    productId: "muse-token-1b",
+    quantity: 1,
+    buyerRef: "tg:111",
+    target: "https://muse.ai/invite/123",
+  };
+  // Saldo supplier kurang (500 < 1000) -> ditolak 400 SEBELUM bayar.
+  stubControl.sondevBalanceIdr = 500;
+  let ores = await orderPost(orderReq(orderBody));
+  const oresBody = (await ores.json()) as { ok: boolean; error?: string };
+  check(
+    "saldo supplier kurang: order ditolak 400 sebelum bayar",
+    ores.status === 400 && (oresBody.error ?? "").includes("supplier"),
+    `status ${ores.status}: ${oresBody.error ?? ""}`,
+  );
+  // API supplier error -> fail open: order + Snap tetap jalan.
+  stubControl.sondevFail = true;
+  stubControl.sondevBalanceIdr = 100000;
+  ores = await orderPost(orderReq(orderBody));
+  const oresBody2 = (await ores.json()) as {
+    ok: boolean;
+    payment?: { redirectUrl: string };
+  };
+  check(
+    "supplier API error: fail open, order + Snap tetap jalan",
+    ores.status === 201 && !!oresBody2.payment?.redirectUrl,
+    `status ${ores.status}`,
+  );
+  stubControl.sondevFail = false;
+  ores = await orderPost(orderReq(orderBody));
+  check(
+    "saldo cukup: order dibuat (201)",
+    ores.status === 201,
+    `status ${ores.status}`,
+  );
+
+  // ================= S29: sesi /cancel, callback asing, tombol back =================
+  await send(cbUpdate(buyer, "cat:all"));
+  await send(cbUpdate(buyer, "prod:muse-token-1b"));
+  await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
+  err = await send(textUpdate(buyer, "/cancel"));
+  check(
+    "/cancel tidak throw + menampilkan dibatalkan",
+    err === null && lastText("sendMessage").includes("Dibatalkan"),
+    err ?? lastText("sendMessage").slice(0, 100),
+  );
+  const callsBeforeFree = calls.length;
+  err = await send(textUpdate(buyer, "halo ada orang?"));
+  check(
+    "teks bebas setelah cancel diabaikan (tanpa balasan baru)",
+    err === null && calls.length === callsBeforeFree,
+    `calls ${callsBeforeFree} -> ${calls.length}`,
+  );
+  err = await send(cbUpdate(buyer, "tidak_ada_xyz"));
+  check("callback tidak dikenal tidak crash", err === null, err ?? undefined);
+  await send(cbUpdate(buyer, "wallet"));
+  err = await send(cbUpdate(buyer, "menu"));
+  check(
+    "tombol Menu Utama kembali ke menu",
+    err === null &&
+      lastText("editMessageText").includes("Welcome to Unicodes Digital"),
+    lastText("editMessageText").slice(0, 120),
+  );
 
   // ---- ringkasan ----
   const failed = results.filter((r) => !r.ok);

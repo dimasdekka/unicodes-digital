@@ -261,7 +261,7 @@ export default function TgShopPage() {
               </div>
               <button
                 style={{ ...btnStyle, marginTop: 10 }}
-                disabled={p.comingSoon}
+                disabled={p.stockState !== "available"}
                 onClick={() => {
                   setSelectedId(p.id);
                   setQty(1);
@@ -271,7 +271,11 @@ export default function TgShopPage() {
                   setDoneOrderId(null);
                 }}
               >
-                {p.comingSoon ? "Segera hadir" : "Beli"}
+                {p.stockState === "available"
+                  ? "Beli"
+                  : p.stockState === "out_of_stock"
+                    ? "Stok Habis"
+                    : "Segera hadir"}
               </button>
             </div>
           ))}

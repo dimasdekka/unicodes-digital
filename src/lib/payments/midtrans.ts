@@ -38,6 +38,18 @@ export interface SnapTransaction {
   redirectUrl: string;
 }
 
+/** Midtrans sering mengembalikan error bisnis sebagai HTTP 200 dengan
+ *  status_code 4xx/5xx DI DALAM body, bukan di HTTP status — mis.
+ *  GET /v2/{id}/status untuk transaksi yang belum dikenal menjawab HTTP 200
+ *  dengan status_code "404" ("Transaction doesn't exist"). Mengecek res.ok
+ *  saja tidak cukup: tanpa cek ini, pemanggil salah mengira API berhasil
+ *  (mis. transaction_status terbaca "" lalu order tidak pernah lunas,
+ *  atau refund gagal diam-diam dianggap sukses). */
+function isMidtransBodyError(body: Record<string, unknown>): boolean {
+  const code = typeof body.status_code === "string" ? body.status_code : "";
+  return /^[45]/.test(code);
+}
+
 /** Buat transaksi Snap untuk satu order toko. Mengembalikan token + URL bayar.
  *  order_id Midtrans = ID order internal kita (UD-...) supaya webhook nanti
  *  langsung ketahuan order mana. */
@@ -158,7 +170,7 @@ export async function getMidtransStatus(
     signal: AbortSignal.timeout(10000),
   });
   const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
-  if (!res.ok) {
+  if (!res.ok || isMidtransBodyError(body)) {
     throw new Error(
       `Midtrans status API gagal: ${String(body.status_message ?? res.status)}`,
     );
@@ -215,7 +227,7 @@ export async function refundMidtrans(
     string,
     unknown
   >;
-  if (!res.ok) {
+  if (!res.ok || isMidtransBodyError(body)) {
     throw new Error(
       `Midtrans refund gagal: ${String(body.status_message ?? res.status)}`,
     );
