@@ -10,8 +10,10 @@
 import { DatabaseSync } from "node:sqlite";
 import path from "node:path";
 
+import { databaseUrl } from "./config";
+
 function dbPath(): string {
-  const url = process.env.DATABASE_URL ?? "file:./dev.db";
+  const url = databaseUrl();
   const file = url.replace(/^file:/, "");
   return path.isAbsolute(file) ? file : path.join(process.cwd(), file);
 }
@@ -59,7 +61,7 @@ function openDb(): DatabaseSync {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
-    -- Dompet pembeli (saldo dipakai bayar order; diisi via Midtrans Snap).
+    -- Dompet pembeli (saldo dipakai bayar order; diisi via QRIS).
     CREATE TABLE IF NOT EXISTS wallets (
       tg_id INTEGER PRIMARY KEY,
       balance_idr INTEGER NOT NULL DEFAULT 0,
@@ -80,7 +82,7 @@ function openDb(): DatabaseSync {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_wallet_txns_tg ON wallet_txns(tg_id, created_at);
-    -- Isi saldo via Midtrans Snap (order_id Midtrans = id ini).
+    -- Isi saldo via QRIS (reference pembayaran QRIS = id ini).
     CREATE TABLE IF NOT EXISTS wallet_topups (
       id TEXT PRIMARY KEY,
       tg_id INTEGER NOT NULL,

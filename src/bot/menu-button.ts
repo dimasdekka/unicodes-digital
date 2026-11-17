@@ -1,20 +1,21 @@
 // Tombol Menu bot Telegram (tombol biru "Menu" di pojok kiri bawah chat).
 // Target: Menu Button type web_app "Buka Toko" yang membuka Mini App /tg.
 //
-// ⚠️ JANGAN PANGGIL setWebAppMenuButton() SEBELUM DEPLOY RAILWAY SELESAI:
+// ⚠️ JANGAN PANGGIL setWebAppMenuButton() SEBELUM DEPLOY SELESAI:
 // URL Web App harus domain PUBLIK (https://<domain>/tg). Selama
 // NEXT_PUBLIC_APP_URL masih localhost / belum diisi, fungsi ini sengaja
 // throw — tombol menu tidak boleh menunjuk ke URL yang tidak bisa dibuka
 // pembeli dari HP-nya.
 //
 // Setelah deploy (lihat DEPLOY.md bagian "Telegram Web App"):
-//   1. Isi NEXT_PUBLIC_APP_URL=https://<domain> di env Railway + .env.local.
+//   1. Isi NEXT_PUBLIC_APP_URL=https://<domain> di env hosting + .env.local.
 //   2. Jalankan sekali dari repo ini:
 //        npx tsx src/bot/set-menu-button.ts
 //   3. Buka chat bot di Telegram — tombol "Menu" kiri bawah jadi "Buka Toko".
 // Fungsi ini idempotent (boleh dijalankan ulang kapan saja).
+import { appUrl, telegramBotToken } from "../lib/config";
 export function getWebAppUrl(): string | undefined {
-  const base = (process.env.NEXT_PUBLIC_APP_URL ?? "").trim().replace(/\/+$/, "");
+  const base = appUrl();
   if (!base) return undefined;
   // Belum publik (dev lokal) — sembunyikan tombol Web App.
   if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(base)) return undefined;
@@ -25,10 +26,7 @@ export async function setWebAppMenuButton(): Promise<{
   ok: boolean;
   description?: string;
 }> {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) {
-    throw new Error("TELEGRAM_BOT_TOKEN belum diisi di .env.local");
-  }
+  const token = telegramBotToken();
   const url = getWebAppUrl();
   if (!url) {
     throw new Error(

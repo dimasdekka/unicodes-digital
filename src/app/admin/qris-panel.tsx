@@ -35,6 +35,243 @@ const rupiah = (n: number) => `Rp${n.toLocaleString("id-ID")}`;
 const wib = (iso: string) =>
   new Date(iso).toLocaleString("id-ID", { timeZone: "Asia/Jakarta" });
 
+interface GopaySession {
+  authenticated: boolean;
+  phone: string | null;
+  expiresAt: string | null;
+  merchantId: string | null;
+  /** Nomor HP GoBiz default (env GOBIZ_PHONE) — untuk prefill input OTP. */
+  defaultPhone?: string | null;
+}
+
+interface GopayMerchant {
+  merchantName: string | null;
+  outletName: string | null;
+  outlets: { popId: string; name: string; status: string; qrString: string | null }[];
+}
+
+/** Seksi sesi GoBiz: login OTP + profil merchant + tombol cek pembayaran.
+ *  OTP diketik Dim di sini (bukan di chat). Token TIDAK PERNAH tampil. */
+function GopaySessionPanel() {
+  const [session, setSession] = useState<GopaySession | null>(null);
+  const [sessionErr, setSessionErr] = useState<string | null>(null);
+  const [merchant, setMerchant] = useState<{
+    profile: GopayMerchant;
+    staticQrisMatches: boolean;
+    warnings: string[];
+  } | null>(null);
+  const [merchantErr, setMerchantErr] = useState<string | null>(null);
+  const [phone, setPhone] = useState("");
+  const [otp, setOtp] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState<string | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [pollRes, setPollRes] = useState<string | null>(null);
+
+  const loadSession = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/payments/gopay/session");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Gagal memuat sesi");
+      setSession(data as GopaySession);
+      setSessionErr(null);
+      // Prefill nomor HP dari default (GOBIZ_PHONE) kalau input masih kosong.
+      if (typeof data.defaultPhone === "string" && data.defaultPhone) {
+        setPhone((prev) => prev || data.defaultPhone);
+      }
+    } catch (e) {
+      setSessionErr(e instanceof Error ? e.message : "Gagal memuat sesi");
+    }
+  }, []);
+
+  const loadMerchant = useCallback(async () => {
+    try {
+      const res = await fetch("/api/admin/payments/gopay/merchant");
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Gagal memuat profil");
+      setMerchant({
+        profile: data.profile as GopayMerchant,
+        staticQrisMatches: !!data.staticQrisMatches,
+        warnings: (data.warnings ?? []) as string[],
+      });
+      setMerchantErr(null);
+    } catch (e) {
+      setMerchantErr(e instanceof Error ? e.message : "Gagal memuat profil");
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadSession();
+  }, [loadSession]);
+
+  useEffect(() => {
+    if (session?.authenticated) void loadMerchant();
+  }, [session?.authenticated, loadMerchant]);
+
+  async function requestOtp() {
+    setBusy(true);
+    setMsg(null);
+    setErr(null);
+    try {
+      const res = await fetch("/api/admin/payments/gopay/otp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ phone }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Gagal minta OTP");
+      setMsg(`OTP dikirim ke ${data.phone ?? phone} — cek SMS/WhatsApp GoBiz, lalu ketik kodenya di bawah (berlaku 10 menit).`);
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Gagal minta OTP");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function verifyOtp() {
+    setBusy(true);
+    setMsg(null);
+    setErr(null);
+    try {
+      const res = await fetch("/api/admin/payments/gopay/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ otp }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Verifikasi gagal");
+      setSession(data.session as GopaySession);
+      setOtp("");
+      setMsg("Login GoBiz berhasil — poller feed sekarang aktif.");
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Verifikasi gagal");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function logout() {
+    setBusy(true);
+    try {
+      await fetch("/api/admin/payments/gopay/logout", { method: "POST" });
+      setSession({ authenticated: false, phone: null, expiresAt: null, merchantId: null });
+      setMerchant(null);
+      setMsg("Sesi GoBiz dihapus — poller berhenti sampai login lagi.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function pollNow() {
+    setBusy(true);
+    setPollRes(null);
+    setErr(null);
+    try {
+      const res = await fetch("/api/admin/payments/gopay/poll", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error ?? "Poll gagal");
+      setPollRes(
+        `Dicek ${data.checked} pembayaran pending — lunas ${data.matched}, kedaluwarsa ${data.expired}.`,
+      );
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Poll gagal");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <h3>Sesi GoBiz (login merchant)</h3>
+      <p style={{ color: "#b3a1e6", fontSize: 13 }}>
+        Bot membaca pembayaran masuk lewat feed GoBiz — butuh sesi login
+        merchant (OTP sekali, lalu refresh otomatis). Sesi tersimpan di
+        database server, bukan di file.
+      </p>
+      {sessionErr && <p style={{ color: "#f87171" }}>{sessionErr}</p>}
+      {session && (
+        <p style={{ color: "#b3a1e6", fontSize: 13 }}>
+          Status:{" "}
+          {session.authenticated ? (
+            <>
+              <strong style={{ color: "#4ade80" }}>login</strong>
+              {session.phone && <> — HP {session.phone}</>}
+              {session.expiresAt && <> — token berlaku s.d. {wib(session.expiresAt)} WIB</>}
+            </>
+          ) : (
+            <strong style={{ color: "#f87171" }}>
+              belum login / sesi kedaluwarsa — minta OTP di bawah
+            </strong>
+          )}
+        </p>
+      )}
+      {merchant && (
+        <p style={{ color: "#b3a1e6", fontSize: 13 }}>
+          Merchant: {merchant.profile.merchantName ?? "?"} ({merchant.profile.outletName ?? "?"})
+          {" — "}QRIS statis outlet{" "}
+          {merchant.staticQrisMatches ? (
+            <strong style={{ color: "#4ade80" }}>cocok dengan panel</strong>
+          ) : (
+            <strong style={{ color: "#f87171" }}>BERBEDA dari panel — perbarui string QRIS</strong>
+          )}
+        </p>
+      )}
+      {merchant?.warnings.map((w) => (
+        <p key={w} style={{ color: "#fbbf24", fontSize: 13 }}>
+          ⚠️ {w}
+        </p>
+      ))}
+      {merchantErr && <p style={{ color: "#f87171" }}>{merchantErr}</p>}
+      <p>
+        <input
+          type="tel"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          placeholder="Nomor HP GoBiz (default: nomor tersimpan)"
+          style={{ ...inputStyle, width: 260 }}
+        />{" "}
+        <button type="button" onClick={requestOtp} disabled={busy || !phone.trim()} style={buttonStyle}>
+          Minta OTP
+        </button>
+      </p>
+      <p>
+        <input
+          type="text"
+          inputMode="numeric"
+          value={otp}
+          onChange={(e) => setOtp(e.target.value)}
+          placeholder="Kode OTP (4–8 digit)"
+          style={{ ...inputStyle, width: 200 }}
+        />{" "}
+        <button type="button" onClick={verifyOtp} disabled={busy || !otp.trim()} style={buttonStyle}>
+          Verifikasi OTP
+        </button>{" "}
+        <button
+          type="button"
+          onClick={logout}
+          disabled={busy || !session?.authenticated}
+          style={{ ...buttonStyle, background: "#4c4466" }}
+        >
+          Keluar
+        </button>
+      </p>
+      <p>
+        <button
+          type="button"
+          onClick={pollNow}
+          disabled={busy || !session?.authenticated}
+          style={buttonStyle}
+        >
+          Cek pembayaran masuk sekarang
+        </button>
+      </p>
+      {msg && <p style={{ color: "#4ade80" }}>{msg}</p>}
+      {err && <p style={{ color: "#f87171" }}>{err}</p>}
+      {pollRes && <p style={{ color: "#4ade80" }}>{pollRes}</p>}
+    </>
+  );
+}
+
 const inputStyle: React.CSSProperties = {
   padding: 10,
   background: "#14092b",
@@ -139,6 +376,7 @@ export default function QrisPanel({
 
   return (
     <>
+      <GopaySessionPanel />
       <p style={{ color: "#b3a1e6", fontSize: 13 }}>
         Status:{" "}
         {status.configured ? (

@@ -13,13 +13,12 @@ import type {
   SupplierProduct,
 } from "./types";
 
-const BASE_URL =
-  process.env.LAHASTORE_BASE_URL ?? "https://lahastore.up.railway.app/api/v1";
+import { lahastoreBaseUrl, lahastoreConfig } from "../config";
+
+const BASE_URL = lahastoreBaseUrl();
 
 function apiKey(): string {
-  const key = process.env.LAHASTORE_API_KEY;
-  if (!key) throw new Error("LAHASTORE_API_KEY belum diisi di .env.local");
-  return key;
+  return lahastoreConfig().apiKey;
 }
 
 async function call<T>(path: string, init?: RequestInit): Promise<T> {

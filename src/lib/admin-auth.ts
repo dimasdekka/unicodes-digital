@@ -2,6 +2,7 @@
 // Cookie berisi sha256(password) — httpOnly. Tanpa ADMIN_PASSWORD di env,
 // halaman admin tidak bisa dibuka siapa pun (fail closed).
 import { createHash } from "node:crypto";
+import { adminPassword } from "./config";
 
 export const ADMIN_COOKIE = "unicodes_admin";
 
@@ -11,7 +12,7 @@ export function hashPassword(password: string): string {
 
 /** sha256(ADMIN_PASSWORD), atau null kalau env belum diisi. */
 export function adminPasswordHash(): string | null {
-  const pw = process.env.ADMIN_PASSWORD;
+  const pw = adminPassword();
   if (!pw) return null;
   return hashPassword(pw);
 }

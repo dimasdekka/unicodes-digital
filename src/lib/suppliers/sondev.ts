@@ -28,16 +28,13 @@ import type {
   SupplierProduct,
 } from "./types";
 
-const BASE_URL =
-  process.env.SONDEV_BASE_URL ?? "https://api.sondevs.tech/api/v1";
+import { sondevBaseUrl, sondevConfig } from "../config";
+
+const BASE_URL = sondevBaseUrl();
 
 function credentials(): { key: string; secret: string } {
-  const key = process.env.SONDEV_API_KEY;
-  const secret = process.env.SONDEV_API_SECRET;
-  if (!key || !secret) {
-    throw new Error("SONDEV_API_KEY / SONDEV_API_SECRET belum diisi di .env.local");
-  }
-  return { key, secret };
+  const { apiKey, apiSecret } = sondevConfig();
+  return { key: apiKey, secret: apiSecret };
 }
 
 function sign(secret: string, timestamp: string, method: string, path: string, body: string): string {

@@ -54,7 +54,7 @@ export interface StoreOrder {
   discountIdr: number;
   /** Kode promo yang dipakai (kalau ada). */
   promoCode?: string | null;
-  /** Cara bayar: "midtrans" | "wallet" | null (belum dibayar). */
+  /** Cara bayar: "qris" | "wallet" | null (belum dibayar). */
   paidVia?: string | null;
   createdAt: string;
   updatedAt: string;
@@ -278,20 +278,34 @@ export async function setOrderTarget(id: string, target: string): Promise<StoreO
   return updateOrder(id, { target });
 }
 
-/** Catat cara bayar order (dipanggil sebelum markPaid dari jalur bot). */
+/** Catat cara bayar order (dipanggil sebelum markPaid dari jalur bot / poller). */
 export async function setOrderPaidVia(
   id: string,
-  paidVia: "midtrans" | "wallet",
+  paidVia: "qris" | "wallet",
 ): Promise<StoreOrder> {
   return updateOrder(id, { paidVia });
 }
 
-/** Dipanggil webhook Midtrans setelah bayar lunas (settlement/capture). */
+/** Dipanggil poller QRIS setelah bayar lunas (feed GoBiz cocok). */
 export async function markPaid(id: string): Promise<StoreOrder> {
   const order = await getStoreOrder(id);
   if (!order) throw new Error(`Order tidak ditemukan: ${id}`);
   if (order.status !== "awaiting_payment") return order; // idempotent
   return updateOrder(id, { status: "paid" });
+}
+
+/** Batalkan order yang QR-nya kedaluwarsa sebelum lunas (dipanggil poller).
+ *  Hanya dari status awaiting_payment — order yang sudah dibayar tidak
+ *  disentuh. Status akhir "failed" dengan alasan jelas supaya pembeli
+ *  tahu harus buat order baru (bukan error supplier). */
+export async function cancelOrderForExpiredPayment(
+  id: string,
+  reason: string,
+): Promise<StoreOrder> {
+  const order = await getStoreOrder(id);
+  if (!order) throw new Error(`Order tidak ditemukan: ${id}`);
+  if (order.status !== "awaiting_payment") return order; // sudah dibayar — jangan batalkan
+  return updateOrder(id, { status: "failed", error: reason });
 }
 
 /** Dipanggil webhook Sondev saat order selesai (order.completed / DELIVERED).
@@ -374,13 +388,14 @@ export async function checkSupplierFunds(
   }
 }
 
-/** Tandai order gagal + coba refund otomatis via Midtrans (pembeli sudah bayar,
- *  karena fulfillOrder hanya jalan untuk order "paid"). Kalau refund berhasil,
- *  status jadi "refunded". Kalau refund gagal, status tetap "failed" dengan
- *  catatan refund manual. Tidak pernah throw — kegagalan refund tidak boleh
- *  menutupi status gagal ordernya.
- *  PENGECUALIAN: order yang dibayar dari DOMPET (paid_via = "wallet") tidak
- *  punya transaksi Midtrans — refund dikembalikan ke dompet pembeli. */
+/** Tandai order gagal. Refund tergantung cara bayar:
+ *  - Dompet (paid_via = "wallet") -> saldo dikembalikan ke dompet otomatis,
+ *    status jadi "refunded".
+ *  - QRIS (paid_via = "qris") -> TIDAK ADA refund otomatis (QRIS tidak
+ *    punya API refund). Status tetap "failed" + catatan refund MANUAL +
+ *    notifikasi ke admin supaya uangnya ditransfer balik manual.
+ *  Tidak pernah throw — kegagalan refund/notifikasi tidak boleh menutupi
+ *  status gagal ordernya. */
 async function failOrder(
   orderId: string,
   error: string,
@@ -393,7 +408,7 @@ async function failOrder(
     resultLink,
     error,
   });
-  // Order dompet -> refund ke dompet (bukan Midtrans).
+  // Order dompet -> refund ke dompet (bukan QRIS).
   if (failed.paidVia === "wallet") {
     try {
       const { refundWalletForOrder, tgIdFromBuyerRef } = await import("./wallet");
@@ -419,23 +434,22 @@ async function failOrder(
       error: `${error} — refund ke dompet gagal, hubungi admin.`,
     });
   }
+  // Order QRIS -> refund MANUAL oleh admin (transfer balik ke pembeli).
   try {
-    // Dynamic import: midtrans.ts mengimpor orders.ts — hindari circular import statis.
-    const { refundMidtrans } = await import("./payments/midtrans");
-    await refundMidtrans(failed.id, failed.retailTotalIdr);
-    return updateOrder(failed.id, {
-      status: "refunded",
-      error: `${error} — refund ke pembeli sudah diproses.`,
-    });
-  } catch (refundErr) {
-    console.error(
-      `[orders] refund otomatis ${failed.id} gagal:`,
-      refundErr instanceof Error ? refundErr.message : String(refundErr),
+    const { notifyAdmin } = await import("./notify");
+    const total = `Rp${failed.retailTotalIdr.toLocaleString("id-ID")}`;
+    void notifyAdmin(
+      `⚠️ <b>Refund manual dibutuhkan</b>\n\nOrder ${failed.id} (${failed.catalogProductId} × ${failed.quantity}, ${total}) gagal setelah dibayar via QRIS.\nPembeli: ${failed.buyerRef ?? "web"}\nAlasan: ${error}\n\nQRIS tidak punya refund otomatis — transfer balik ${total} ke pembeli secara manual, lalu kabari pembeli.`,
     );
-    return updateOrder(failed.id, {
-      error: `${error} — refund otomatis gagal, refund manual via dashboard Midtrans.`,
-    });
+  } catch (notifyErr) {
+    console.error(
+      `[orders] notifikasi refund manual ${failed.id} gagal:`,
+      notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+    );
   }
+  return updateOrder(failed.id, {
+    error: `${error} — refund manual: admin akan transfer balik ke kamu, hubungi support kalau belum masuk.`,
+  });
 }
 
 /** Jalankan fulfillment ke supplier. Hanya untuk order yang sudah "paid".
@@ -581,7 +595,7 @@ export async function fulfillOrder(orderId: string): Promise<StoreOrder> {
     }
     return failOrder(
       order.id,
-      "Timeout menunggu supplier — refund ke pembeli diproses otomatis, cek manual di admin.",
+      "Timeout menunggu supplier — admin akan memproses refund manual, hubungi support kalau belum ada kabar.",
       deliveredItems,
       resultLink,
     );

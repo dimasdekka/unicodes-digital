@@ -1,5 +1,5 @@
 // Dompet pembeli, pengguna bot, kode promo, dan referral — SQLite (db.ts).
-// Dipakai bot Telegram + webhook Midtrans (top-up). Semua mutasi saldo
+// Dipakai bot Telegram + poller QRIS (top-up). Semua mutasi saldo
 // berjalan dalam SATU transaksi SQLite (BEGIN IMMEDIATE ... COMMIT) supaya
 // saldo + riwayat tidak pernah setengah jalan.
 //
@@ -334,7 +334,8 @@ export function getTopup(id: string): WalletTopup | null {
 
 /**
  * Tandai top-up lunas + kredit dompet. Idempotent: top-up yang sudah "paid"
- * tidak dikredit dua kali (dipakai webhook Midtrans yang bisa retry).
+ * tidak dikredit dua kali (dipakai poller QRIS — feed bisa mengulang
+ * transaksi yang sama di tick berikutnya).
  */
 export function markTopupPaid(id: string): { credited: boolean; topup: WalletTopup | null } {
   const topup = getTopup(id);
@@ -354,7 +355,7 @@ export function markTopupPaid(id: string): { credited: boolean; topup: WalletTop
       amountIdr: topup.amountIdr,
       kind: "topup",
       ref: id,
-      note: "Isi saldo via Midtrans",
+      note: "Isi saldo via QRIS",
     });
     return true;
   });
@@ -620,7 +621,7 @@ export function topReferrers(limit = 5): { tgId: number; invited: number; reward
 /**
  * Bayar reward referral setelah teman menyelesaikan order berbayar PERTAMA.
  * Idempotent (rewarded=0 dicek + di-update atomik) + hanya untuk order pertama
- * teman itu. Dipanggil setelah markPaid (webhook Midtrans & bayar saldo).
+ * teman itu. Dipanggil setelah markPaid (poller QRIS & bayar saldo).
  * Mengembalikan true kalau reward dibayarkan.
  */
 export function maybeRewardReferrer(referredTgId: number): boolean {

@@ -6,13 +6,13 @@ dotenv.config({ path: ".env.local" });
 
 import { SondevAdapter } from "../src/lib/suppliers/sondev";
 import { LahaStoreAdapter } from "../src/lib/suppliers/lahastore";
+import { lahastoreConfig } from "../src/lib/config";
 
-const LAHA_BASE =
-  process.env.LAHASTORE_BASE_URL ?? "https://lahastore.up.railway.app/api/v1";
+const { baseUrl: LAHA_BASE, apiKey: LAHA_KEY } = lahastoreConfig();
 
 async function lahaRaw(path: string): Promise<unknown> {
   const res = await fetch(`${LAHA_BASE}${path}`, {
-    headers: { "X-API-Key": process.env.LAHASTORE_API_KEY ?? "" },
+    headers: { "X-API-Key": LAHA_KEY },
   });
   const text = await res.text();
   try {

@@ -7,11 +7,12 @@
 //   window.Telegram.WebApp (initData, user, themeParams).
 // - Katalog diambil dari GET /api/products (sama seperti storefront web).
 // - Checkout POST /api/orders dengan initData — server memvalidasi initData
-//   (src/lib/telegram-webapp.ts) lalu membuat order + Snap. Link bayar
-//   dibuka via Telegram.WebApp.openLink (di luar WebView, supaya Midtrans
-//   Snap tidak terjebak di dalam WebView).
-// - Setelah bayar lunas, webhook Midtrans -> markPaid -> fulfillOrder ->
-//   bot mengirim hasil order ke chat user (src/lib/notify.ts).
+//   (src/lib/telegram-webapp.ts) lalu membuat order + pembayaran QRIS
+//   dinamis (kartu standee komposit, base64). QR tampil DI DALAM WebView —
+//   tidak ada redirect keluar.
+// - Status order dipantau lewat GET /api/orders/[id] tiap 10 detik sampai
+//   delivered/failed; setelah lunas, poller feed GoBiz -> markPaid ->
+//   fulfillOrder -> bot mengirim hasil order ke chat user (src/lib/notify.ts).
 // - Dibuka di luar Telegram: katalog tetap bisa dilihat, checkout menampilkan
 //   arahan buka lewat bot. Halaman ini TIDAK mengubah storefront web biasa.
 "use client";
@@ -31,7 +32,6 @@ interface TelegramWebApp {
   themeParams?: Record<string, string | undefined>;
   ready: () => void;
   expand: () => void;
-  openLink: (url: string) => void;
   setBackgroundColor?: (color: string) => void;
   setHeaderColor?: (color: string) => void;
 }
@@ -75,6 +75,14 @@ export default function TgShopPage() {
   const [paying, setPaying] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [doneOrderId, setDoneOrderId] = useState<string | null>(null);
+  const [payment, setPayment] = useState<{
+    qrPngBase64: string;
+    uniqueAmountIdr: number;
+    expiresAt: string;
+    orderId: string;
+  } | null>(null);
+  const [orderStatus, setOrderStatus] = useState<string | null>(null);
+  const [orderResult, setOrderResult] = useState<string | null>(null);
   const inited = useRef(false);
 
   // Inisialisasi Telegram WebApp (dipanggil saat mount + saat script selesai load).
@@ -168,17 +176,84 @@ export default function TgShopPage() {
           typeof body.error === "string" ? body.error : "Checkout gagal.",
         );
       }
-      const order = body.order as { id: string };
-      const payment = body.payment as { redirectUrl: string };
+      const order = body.order as { id: string; status: string };
+      const pay = body.payment as {
+        qrPngBase64: string;
+        uniqueAmountIdr: number;
+        expiresAt: string;
+      } | null;
       setDoneOrderId(order.id);
-      // Bayar di luar WebView — Snap Midtrans tidak boleh dibuka di dalam WebView.
-      tg.openLink(payment.redirectUrl);
+      if (!pay) {
+        // Order gratis — langsung diproses, pantau statusnya saja.
+        setOrderStatus("paid");
+        return;
+      }
+      setPayment({
+        qrPngBase64: pay.qrPngBase64,
+        uniqueAmountIdr: pay.uniqueAmountIdr,
+        expiresAt: pay.expiresAt,
+        orderId: order.id,
+      });
+      setOrderStatus("awaiting_payment");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Checkout gagal.");
     } finally {
       setPaying(false);
     }
   }
+
+  // Pantau status order tiap 10 detik sampai delivered / failed / refunded,
+  // atau sampai QR kedaluwarsa. Berhenti sendiri — tidak polling selamanya.
+  useEffect(() => {
+    if (!doneOrderId) return;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/orders/${doneOrderId}`);
+        const body = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          order?: {
+            status?: string;
+            deliveredItems?: string[];
+            resultLink?: string | null;
+            error?: string | null;
+          };
+        };
+        if (stopped || !body.ok || !body.order) return;
+        const st = body.order.status ?? "";
+        setOrderStatus(st);
+        if (st === "delivered") {
+          setOrderResult(
+            (body.order.deliveredItems ?? []).join("\n") ||
+              body.order.resultLink ||
+              "Order selesai.",
+          );
+        } else if (st === "failed" || st === "refunded") {
+          setOrderResult(body.order.error ?? "Order gagal.");
+        }
+        if (st === "delivered" || st === "failed" || st === "refunded") {
+          stopped = true;
+        }
+      } catch {
+        // Gagal cek sekali — coba lagi di tick berikutnya.
+      }
+    };
+    void tick();
+    const timer = setInterval(() => {
+      if (payment && Date.now() > new Date(payment.expiresAt).getTime()) {
+        setOrderStatus("failed");
+        setOrderResult("QR kedaluwarsa sebelum dibayar — buat order baru.");
+        stopped = true;
+        clearInterval(timer);
+        return;
+      }
+      void tick();
+    }, 10_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [doneOrderId, payment]);
 
   const cardStyle: React.CSSProperties = {
     background: theme.secondaryBg,
@@ -371,9 +446,48 @@ export default function TgShopPage() {
           <div style={{ fontWeight: 700, margin: "10px 0" }}>
             Total: {rupiah(selected.retailPriceIdr * effectiveQty)}
           </div>
-          <button style={btnStyle} disabled={paying} onClick={checkout}>
-            {paying ? "Memproses…" : `Bayar ${rupiah(selected.retailPriceIdr * effectiveQty)}`}
-          </button>
+          {payment ? (
+            <div style={{ textAlign: "center" }}>
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src={`data:image/png;base64,${payment.qrPngBase64}`}
+                alt="QRIS pembayaran"
+                style={{ width: "100%", maxWidth: 360, borderRadius: 12 }}
+              />
+              <div style={{ fontSize: 14, marginTop: 8 }}>
+                Scan QR di atas — nominal{" "}
+                <strong>{rupiah(payment.uniqueAmountIdr)}</strong> (harus pas).
+                Berlaku sampai{" "}
+                {new Date(payment.expiresAt).toLocaleTimeString("id-ID", {
+                  timeZone: "Asia/Jakarta",
+                  hour: "2-digit",
+                  minute: "2-digit",
+                })}{" "}
+                WIB.
+              </div>
+              <div style={{ fontSize: 13, color: theme.hint, marginTop: 6 }}>
+                {orderStatus === "awaiting_payment" &&
+                  "Menunggu pembayaran… (dicek otomatis tiap 10 detik)"}
+                {orderStatus === "paid" && "✅ Lunas — sedang diproses ke supplier…"}
+                {orderStatus === "processing" && "⏳ Sedang diproses ke supplier…"}
+                {orderStatus === "delivered" && `✅ Selesai!\n${orderResult ?? ""}`}
+                {(orderStatus === "failed" || orderStatus === "refunded") &&
+                  `❌ ${orderResult ?? "Order gagal."}`}
+              </div>
+            </div>
+          ) : doneOrderId ? (
+            <div style={{ fontSize: 14 }}>
+              {orderStatus === "delivered"
+                ? `✅ Selesai!\n${orderResult ?? ""}`
+                : orderStatus === "failed" || orderStatus === "refunded"
+                  ? `❌ ${orderResult ?? "Order gagal."}`
+                  : "✅ Order dibuat — sedang diproses…"}
+            </div>
+          ) : (
+            <button style={btnStyle} disabled={paying} onClick={checkout}>
+              {paying ? "Memproses…" : `Bayar ${rupiah(selected.retailPriceIdr * effectiveQty)}`}
+            </button>
+          )}
           <button
             style={{
               ...btnStyle,
@@ -385,6 +499,9 @@ export default function TgShopPage() {
               setSelectedId(null);
               setError(null);
               setDoneOrderId(null);
+              setPayment(null);
+              setOrderStatus(null);
+              setOrderResult(null);
             }}
           >
             ⬅️ Kembali ke katalog

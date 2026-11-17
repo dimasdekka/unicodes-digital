@@ -1,15 +1,27 @@
 import { NextResponse } from "next/server";
-import { checkSupplierFunds, createStoreOrder } from "@/lib/orders";
-import { createSnapTransaction } from "@/lib/payments/midtrans";
+import {
+  checkSupplierFunds,
+  createStoreOrder,
+  fulfillOrder,
+  markPaid,
+  setOrderPaidVia,
+} from "@/lib/orders";
+import { createQrisPayment } from "@/lib/payments/qris";
+import { renderQrisCardOrPlain } from "@/lib/payments/qris-card";
+import { getGopayStaticQris } from "@/lib/payments/qris-settings";
 import { validateInitData } from "@/lib/telegram-webapp";
+import { telegramBotToken } from "@/lib/config";
 
 /**
- * POST /api/orders — buat order + transaksi Midtrans Snap.
+ * POST /api/orders — buat order + pembayaran QRIS dinamis.
  * Body JSON: { productId, quantity?, buyerRef?, xiaomiAccounts?, sheeridUrl? }
- * Balasan: { ok, order: { id, status, totalIdr }, payment: { token, redirectUrl } }
- * Pembeli diarahkan ke redirectUrl untuk bayar (QRIS/e-wallet/VA/dll).
- * Setelah lunas, webhook Midtrans (/api/webhooks/midtrans) akan memanggil
- * markPaid -> fulfillOrder otomatis.
+ * Balasan: { ok, order: { id, status, totalIdr }, payment: {
+ *   qrPngBase64, qrString, uniqueAmountIdr, expiresAt, reference } | null }
+ * Pembeli scan QR (kartu standee komposit) dengan nominal unik yang tertera.
+ * Setelah lunas, poller feed GoBiz (/lib/payments/qris-poller.ts) akan
+ * memanggil markPaid -> fulfillOrder otomatis. Klien (web / /tg) memantau
+ * status order lewat GET /api/orders/[id] sampai delivered/failed.
+ * payment null = order gratis (total 0) — langsung diproses.
  *
  * Telegram Web App: kirim juga { initData } (dari Telegram.WebApp.initData).
  * Kalau initData ada, server memvalidasinya (HMAC bot token) dan buyerRef
@@ -28,8 +40,10 @@ export async function POST(req: Request) {
     let buyerRef =
       typeof body.buyerRef === "string" ? body.buyerRef : "web";
     if (typeof body.initData === "string" && body.initData) {
-      const botToken = process.env.TELEGRAM_BOT_TOKEN;
-      if (!botToken) {
+      let botToken: string;
+      try {
+        botToken = telegramBotToken();
+      } catch {
         return NextResponse.json(
           { ok: false, error: "Telegram belum dikonfigurasi di server." },
           { status: 500 },
@@ -66,12 +80,44 @@ export async function POST(req: Request) {
       // Sondev: target WAJIB untuk produk on-demand (kode invite / email).
       target: typeof body.target === "string" ? body.target.trim() : null,
     });
-    const payment = await createSnapTransaction(order.id);
+    // Order gratis (promo menutup total) — langsung lunas + proses.
+    if (order.retailTotalIdr <= 0) {
+      await markPaid(order.id);
+      void fulfillOrder(order.id).catch((err: unknown) => {
+        console.error(`[api/orders] fulfill ${order.id} gagal:`, err);
+      });
+      return NextResponse.json(
+        {
+          ok: true,
+          order: { id: order.id, status: "paid", totalIdr: 0 },
+          payment: null,
+        },
+        { status: 201 },
+      );
+    }
+    await setOrderPaidVia(order.id, "qris");
+    const staticPayload = getGopayStaticQris();
+    if (!staticPayload) {
+      throw new Error("QRIS statis belum dipasang di panel admin (/admin).");
+    }
+    const { payment: qrisPayment, qrString } = createQrisPayment({
+      reference: order.id,
+      amountIdr: order.retailTotalIdr,
+      staticPayload,
+    });
+    // Kartu standee komposit (fallback QR polos kalau template tidak ada).
+    const { png } = await renderQrisCardOrPlain(qrString);
     return NextResponse.json(
       {
         ok: true,
         order: { id: order.id, status: order.status, totalIdr: order.retailTotalIdr },
-        payment,
+        payment: {
+          qrPngBase64: png.toString("base64"),
+          qrString,
+          uniqueAmountIdr: qrisPayment.unique_amount_idr,
+          expiresAt: qrisPayment.expires_at,
+          reference: qrisPayment.reference,
+        },
       },
       { status: 201 },
     );

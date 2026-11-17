@@ -1,9 +1,11 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
-/** Tombol beli: buat order + transaksi Midtrans, lalu arahkan ke halaman bayar.
- *  Produk on-demand (mis. Muse) wajib target — inputnya tampil di kartu produk. */
+/** Tombol beli: buat order + pembayaran QRIS dinamis (kartu standee komposit),
+ *  tampilkan QR di halaman (bukan redirect), lalu pantau status order tiap
+ *  10 detik sampai delivered/failed. Produk on-demand (mis. Muse) wajib
+ *  target — inputnya tampil di kartu produk. */
 export function BuyButton({
   productId,
   requiresTarget,
@@ -21,6 +23,74 @@ export function BuyButton({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [target, setTarget] = useState("");
+  const [payment, setPayment] = useState<{
+    qrPngBase64: string;
+    uniqueAmountIdr: number;
+    expiresAt: string;
+    orderId: string;
+  } | null>(null);
+  const [orderStatus, setOrderStatus] = useState<string | null>(null);
+  const [orderResult, setOrderResult] = useState<string | null>(null);
+
+  const rupiah = (n: number) => `Rp${n.toLocaleString("id-ID")}`;
+  const wibTime = (iso: string) =>
+    new Date(iso).toLocaleTimeString("id-ID", {
+      timeZone: "Asia/Jakarta",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+
+  // Pantau status order sampai delivered / failed / refunded, atau sampai
+  // QR kedaluwarsa. Berhenti sendiri.
+  useEffect(() => {
+    if (!payment) return;
+    let stopped = false;
+    const tick = async () => {
+      try {
+        const res = await fetch(`/api/orders/${payment.orderId}`);
+        const body = (await res.json().catch(() => ({}))) as {
+          ok?: boolean;
+          order?: {
+            status?: string;
+            deliveredItems?: string[];
+            resultLink?: string | null;
+            error?: string | null;
+          };
+        };
+        if (stopped || !body.ok || !body.order) return;
+        const st = body.order.status ?? "";
+        setOrderStatus(st);
+        if (st === "delivered") {
+          setOrderResult(
+            (body.order.deliveredItems ?? []).join("\n") ||
+              body.order.resultLink ||
+              "Order selesai.",
+          );
+          stopped = true;
+        } else if (st === "failed" || st === "refunded") {
+          setOrderResult(body.order.error ?? "Order gagal.");
+          stopped = true;
+        }
+      } catch {
+        // Gagal cek sekali — coba lagi di tick berikutnya.
+      }
+    };
+    void tick();
+    const timer = setInterval(() => {
+      if (Date.now() > new Date(payment.expiresAt).getTime()) {
+        setOrderStatus("failed");
+        setOrderResult("QR kedaluwarsa sebelum dibayar — buat order baru.");
+        stopped = true;
+        clearInterval(timer);
+        return;
+      }
+      void tick();
+    }, 10_000);
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }, [payment]);
 
   async function buy() {
     if (requiresTarget && !target.trim()) {
@@ -43,12 +113,30 @@ export function BuyButton({
       const data = (await res.json()) as {
         ok: boolean;
         error?: string;
-        payment?: { redirectUrl: string };
+        order?: { id: string; status: string };
+        payment?: {
+          qrPngBase64: string;
+          uniqueAmountIdr: number;
+          expiresAt: string;
+          reference: string;
+        } | null;
       };
-      if (!data.ok || !data.payment?.redirectUrl) {
+      if (!data.ok || !data.order) {
         throw new Error(data.error ?? "Gagal membuat order");
       }
-      window.location.href = data.payment.redirectUrl;
+      if (!data.payment) {
+        // Order gratis — langsung diproses.
+        setOrderStatus("paid");
+        setOrderResult("Order gratis dibuat — sedang diproses.");
+        return;
+      }
+      setPayment({
+        qrPngBase64: data.payment.qrPngBase64,
+        uniqueAmountIdr: data.payment.uniqueAmountIdr,
+        expiresAt: data.payment.expiresAt,
+        orderId: data.order.id,
+      });
+      setOrderStatus("awaiting_payment");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
       setBusy(false);
@@ -57,7 +145,7 @@ export function BuyButton({
 
   return (
     <>
-      {requiresTarget && (
+      {requiresTarget && !payment && (
         <p style={{ margin: "8px 0" }}>
           <input
             type="text"
@@ -77,28 +165,56 @@ export function BuyButton({
           />
         </p>
       )}
-      <button
-        type="button"
-        onClick={buy}
-        disabled={busy || disabled}
-        style={{
-          width: "100%",
-          background: disabled
-            ? "#4c4466"
-            : "linear-gradient(90deg, #7c3aed, #a855f7)",
-          color: "#fff",
-          border: "none",
-          borderRadius: 10,
-          padding: "12px 20px",
-          fontSize: 15,
-          fontWeight: 700,
-          cursor: disabled ? "not-allowed" : "pointer",
-          boxShadow: disabled ? "none" : "0 4px 16px #7c3aed66",
-        }}
-      >
-        {disabled ? (disabledLabel ?? "Segera hadir") : busy ? "Memproses..." : "Beli Sekarang"}
-      </button>
+      {payment ? (
+        <div style={{ textAlign: "center" }}>
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={`data:image/png;base64,${payment.qrPngBase64}`}
+            alt="QRIS pembayaran"
+            style={{ width: "100%", maxWidth: 360, borderRadius: 12 }}
+          />
+          <p style={{ fontSize: 14, margin: "8px 0 0" }}>
+            Scan QR di atas — nominal{" "}
+            <strong>{rupiah(payment.uniqueAmountIdr)}</strong> (harus pas).
+            Berlaku sampai {wibTime(payment.expiresAt)} WIB.
+          </p>
+          <p style={{ fontSize: 13, color: "#b3a1e6", margin: "6px 0 0" }}>
+            {orderStatus === "awaiting_payment" &&
+              "Menunggu pembayaran… (dicek otomatis tiap 10 detik)"}
+            {orderStatus === "paid" && "✅ Lunas — sedang diproses ke supplier…"}
+            {orderStatus === "processing" && "⏳ Sedang diproses ke supplier…"}
+            {orderStatus === "delivered" && `✅ Selesai!\n${orderResult ?? ""}`}
+            {(orderStatus === "failed" || orderStatus === "refunded") &&
+              `❌ ${orderResult ?? "Order gagal."}`}
+          </p>
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={buy}
+          disabled={busy || disabled}
+          style={{
+            width: "100%",
+            background: disabled
+              ? "#4c4466"
+              : "linear-gradient(90deg, #7c3aed, #a855f7)",
+            color: "#fff",
+            border: "none",
+            borderRadius: 10,
+            padding: "12px 20px",
+            fontSize: 15,
+            fontWeight: 700,
+            cursor: disabled ? "not-allowed" : "pointer",
+            boxShadow: disabled ? "none" : "0 4px 16px #7c3aed66",
+          }}
+        >
+          {disabled ? (disabledLabel ?? "Segera hadir") : busy ? "Memproses..." : "Beli Sekarang"}
+        </button>
+      )}
       {error && <p style={{ color: "#f87171", fontSize: 13 }}>{error}</p>}
+      {!payment && orderResult && (
+        <p style={{ color: "#4ade80", fontSize: 13 }}>{orderResult}</p>
+      )}
     </>
   );
 }

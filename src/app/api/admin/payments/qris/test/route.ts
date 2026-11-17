@@ -7,8 +7,8 @@ import { NextResponse } from "next/server";
 import { isAdminRequest } from "@/lib/admin-api";
 import {
   createQrisPayment,
-  renderQrisPng,
 } from "@/lib/payments/qris";
+import { renderQrisCardOrPlain } from "@/lib/payments/qris-card";
 import { getGopayStaticQris } from "@/lib/payments/qris-settings";
 
 const MIN_AMOUNT = 100;
@@ -48,7 +48,8 @@ export async function GET(req: Request) {
       amountIdr: amount,
       staticPayload: staticQris,
     });
-    const png = await renderQrisPng(qrString);
+    // Kartu standee komposit (fallback QR polos kalau template tidak ada).
+    const { png } = await renderQrisCardOrPlain(qrString);
     return NextResponse.json({
       qr_png_base64: png.toString("base64"),
       qr_string: qrString,

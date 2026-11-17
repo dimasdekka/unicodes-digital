@@ -22,6 +22,10 @@ yarn-error.log*
 .env
 !.env.example
 
+# aset bot (binary, berisi file_id/template lokal) — JANGAN commit;
+# di host produksi ditambahkan manual (lihat DEPLOY.md)
+src/bot/assets/
+
 # database lokal — JANGAN commit (isinya order + data toko; di Railway
 # tinggal di volume, bukan di repo)
 dev.db

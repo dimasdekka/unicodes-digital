@@ -345,6 +345,16 @@ export function expireQrisPayments(now: Date = new Date()): number {
   return Number(result.changes);
 }
 
+/** Daftar pembayaran pending yang sudah lewat expires_at (belum disapu).
+ *  Dipakai poller supaya order yang QR-nya kedaluwarsa bisa dibatalkan. */
+export function listExpiredPendingQrisPayments(now: Date = new Date()): QrisPaymentRow[] {
+  return getDb()
+    .prepare(
+      "SELECT * FROM qris_payments WHERE status = 'pending' AND expires_at <= ? ORDER BY created_at ASC",
+    )
+    .all(now.toISOString()) as unknown as QrisPaymentRow[];
+}
+
 /** Tandai pending jadi 'paid'. False kalau id tidak ada / sudah bukan pending. */
 export function markQrisPaymentPaid(id: string): boolean {
   const result = getDb()

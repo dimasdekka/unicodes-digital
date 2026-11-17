@@ -4,12 +4,12 @@
 //
 // Alur order SAMA dengan web (src/lib) — bot di sini cuma antarmuka chat.
 //   /start -> menu -> katalog -> detail -> jumlah -> target (bila wajib)
-//   -> promo (opsional) -> bayar (saldo / Snap Midtrans) -> fulfill ->
+//   -> promo (opsional) -> bayar (saldo / QRIS dinamis) -> fulfill ->
 //   hasil dikirim bot ke chat pembeli (src/lib/notify.ts).
 //
 // Jalankan: npm run bot (long polling; TELEGRAM_BOT_TOKEN di .env.local)
 // Token: @BotFather -> /newbot. Admin IDs: /getid atau @userinfobot.
-import { Bot, InlineKeyboard, type Context } from "grammy";
+import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import {
   getCatalogProduct,
   listActiveProductsByCategory,
@@ -26,10 +26,9 @@ import {
   setOrderPaidVia,
   type StoreOrder,
 } from "../lib/orders";
-import {
-  createSnapTransaction,
-  createSnapTransactionForTopup,
-} from "../lib/payments/midtrans";
+import { createQrisPayment } from "../lib/payments/qris";
+import { renderQrisCardOrPlain } from "../lib/payments/qris-card";
+import { getGopayStaticQris } from "../lib/payments/qris-settings";
 import { notifyBuyer } from "../lib/notify";
 import {
   MIN_TOPUP_IDR,
@@ -57,6 +56,7 @@ import {
 import { rupiah, t, type Strings } from "./i18n";
 import { cancelAwaiting, getSession, type CheckoutDraft } from "./session";
 import { getWebAppUrl } from "./menu-button";
+import { telegramAdminIds, telegramBotToken } from "../lib/config";
 
 const ADMIN_USERNAME = "@Dimas0227";
 const QTY_PACKS = [1, 5, 10, 30];
@@ -72,10 +72,7 @@ const BOT_COMMANDS: { command: string; description: string }[] = [
 ];
 
 function adminIds(): string[] {
-  return (process.env.TELEGRAM_ADMIN_IDS ?? "")
-    .split(",")
-    .map((s) => s.trim())
-    .filter(Boolean);
+  return telegramAdminIds().map(String);
 }
 
 function isAdmin(ctx: Context): boolean {
@@ -169,7 +166,6 @@ async function showMenu(ctx: Context): Promise<void> {
     ctx.from?.first_name ?? "teman",
     stats.orderCount,
     stats.totalSpentIdr,
-    referralCode(id),
   );
   const kb = menuKeyboard(langOf(id));
   // Home dari command (/start, /menu): kirim banner sebagai foto.
@@ -297,7 +293,7 @@ async function showPay(ctx: Context, draft: CheckoutDraft, notice?: string): Pro
     kb.text("✅ Proses Order (Gratis)", "pay_wallet").row();
   } else {
     kb.text(s.payWallet, "pay_wallet").row();
-    kb.text(s.paySnap, "pay_snap").row();
+    kb.text(s.payQris, "pay_qris").row();
   }
   kb.text("🎟️ Pakai Promo", "promo_enter").row();
   kb.text("❌ Batal", "cancel_checkout").text(s.backMenu, "menu");
@@ -453,7 +449,24 @@ async function payWithWallet(ctx: Context): Promise<void> {
   fulfillInBackground(order.id);
 }
 
-async function payWithSnap(ctx: Context): Promise<void> {
+/** Kirim foto QR pembayaran: kartu standee komposit (QR dinamis di tengah
+ *  frame standee) kalau template ada, QR polos kalau tidak. Nominal +
+ *  kedaluwarsa ada di caption, bukan di gambar. */
+async function sendQrisPhoto(
+  ctx: Context,
+  qrString: string,
+  caption: string,
+): Promise<void> {
+  const id = uid(ctx);
+  const { png } = await renderQrisCardOrPlain(qrString);
+  await ctx.replyWithPhoto(new InputFile(png, "qris-unicodes-digital.png"), {
+    caption,
+    parse_mode: "HTML",
+    reply_markup: id != null ? backRow(langOf(id)) : undefined,
+  });
+}
+
+async function payWithQris(ctx: Context): Promise<void> {
   const id = uid(ctx);
   if (id == null) return;
   const s = sOf(id);
@@ -482,9 +495,9 @@ async function payWithSnap(ctx: Context): Promise<void> {
     }), backRow(langOf(id)));
     return;
   }
-  await setOrderPaidVia(order.id, "midtrans");
+  await setOrderPaidVia(order.id, "qris");
   if (order.retailTotalIdr === 0) {
-    // Gratis berkat promo — tanpa Snap.
+    // Gratis berkat promo — tanpa QR.
     await markPaid(order.id);
     try {
       maybeRewardReferrer(id);
@@ -498,17 +511,29 @@ async function payWithSnap(ctx: Context): Promise<void> {
     return;
   }
   try {
-    const payment = await createSnapTransaction(order.id);
+    const staticPayload = getGopayStaticQris();
+    if (!staticPayload) {
+      throw new Error("QRIS statis belum dipasang di panel admin (/admin).");
+    }
+    const { payment, qrString } = createQrisPayment({
+      reference: order.id,
+      amountIdr: order.retailTotalIdr,
+      staticPayload,
+    });
     session.draft = undefined;
     session.awaiting = undefined;
-    await render(
+    await sendQrisPhoto(
       ctx,
-      s.snapLink(order.id, order.retailTotalIdr, payment.redirectUrl),
-      backRow(langOf(id)),
+      qrString,
+      s.qrisLink(order.id, order.retailTotalIdr, payment.unique_amount_idr, payment.expires_at),
     );
   } catch (err) {
-    console.error("[bot] Snap gagal:", err);
-    await render(ctx, s.snapFailed, backRow(langOf(id)));
+    console.error("[bot] QRIS gagal:", err);
+    await render(
+      ctx,
+      s.qrisFailed(err instanceof Error ? err.message : undefined),
+      backRow(langOf(id)),
+    );
   }
 }
 
@@ -554,8 +579,20 @@ async function startTopup(ctx: Context, amountIdr: number): Promise<void> {
   const s = sOf(id);
   try {
     const topup = createTopup(id, amountIdr);
-    const payment = await createSnapTransactionForTopup(topup.id, topup.amountIdr);
-    await render(ctx, s.topupCreated(topup.amountIdr, payment.redirectUrl), backRow(langOf(id)));
+    const staticPayload = getGopayStaticQris();
+    if (!staticPayload) {
+      throw new Error("QRIS statis belum dipasang di panel admin (/admin).");
+    }
+    const { payment, qrString } = createQrisPayment({
+      reference: topup.id,
+      amountIdr: topup.amountIdr,
+      staticPayload,
+    });
+    await sendQrisPhoto(
+      ctx,
+      qrString,
+      s.topupCreated(topup.amountIdr, payment.unique_amount_idr, payment.expires_at),
+    );
   } catch (err) {
     console.error("[bot] top-up gagal:", err);
     await render(ctx, s.topupFailed, backRow(langOf(id)));
@@ -748,12 +785,7 @@ function fixedFetch(
 }
 
 export function createBot(): Bot {
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) {
-    throw new Error(
-      "TELEGRAM_BOT_TOKEN belum diisi di .env.local (ambil dari @BotFather)",
-    );
-  }
+  const token = telegramBotToken();
   const bot = new Bot(token, { client: { fetch: fixedFetch as typeof fetch } });
 
   // Daftarkan pengguna di DB setiap ada interaksi (upsert murah).
@@ -822,7 +854,7 @@ export function createBot(): Bot {
   });
 
   // Khusus admin — jalankan fulfillment setelah bayar terkonfirmasi.
-  // Normalnya ini otomatis via webhook Midtrans (bayar lunas -> markPaid -> fulfillOrder).
+  // Normalnya ini otomatis via poller QRIS (feed GoBiz -> markPaid -> fulfillOrder).
   bot.command("fulfill", async (ctx) => {
     const id = uid(ctx);
     if (id == null) return;
@@ -1006,9 +1038,9 @@ export function createBot(): Bot {
     await payWithWallet(ctx);
   });
 
-  bot.callbackQuery("pay_snap", async (ctx) => {
+  bot.callbackQuery("pay_qris", async (ctx) => {
     await answerCb(ctx);
-    await payWithSnap(ctx);
+    await payWithQris(ctx);
   });
 
   bot.callbackQuery("cancel_checkout", async (ctx) => {

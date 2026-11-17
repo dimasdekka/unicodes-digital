@@ -1,18 +1,23 @@
 // Notifikasi Telegram ke pembeli saat order selesai/gagal.
-// Dipakai jalur bot (bayar saldo) DAN webhook Midtrans (bayar QRIS/dll) —
+// Dipakai jalur bot (bayar saldo) DAN poller QRIS —
 // pembeli tidak perlu mengecek /order terus-menerus.
 // Dikirim via fetch langsung ke Bot API (tanpa grammY) supaya bisa dipakai
 // dari proses web (Next.js) maupun proses bot. Gagal kirim = log saja,
 // jangan pernah menggagalkan order.
 import type { StoreOrder } from "./orders";
 import { getUser, tgIdFromBuyerRef } from "./wallet";
+import { telegramAdminIds, telegramBotToken } from "./config";
 import { rupiah, t } from "../bot/i18n";
 
 export async function notifyBuyer(order: StoreOrder): Promise<void> {
   const tgId = tgIdFromBuyerRef(order.buyerRef);
   if (tgId == null) return; // order web / tanpa pembeli Telegram
-  const token = process.env.TELEGRAM_BOT_TOKEN;
-  if (!token) return;
+  let token: string;
+  try {
+    token = telegramBotToken();
+  } catch {
+    return;
+  }
   const user = getUser(tgId);
   const lang = user?.lang ?? "id";
   const s = t(lang);
@@ -57,6 +62,38 @@ export async function notifyBuyer(order: StoreOrder): Promise<void> {
     console.error(
       "[notify] gagal kirim ke",
       tgId,
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+}
+
+/** Kirim pesan ke admin pertama (TELEGRAM_ADMIN_IDS[0]).
+ *  Dipakai untuk hal yang butuh tindakan manusia — mis. refund manual QRIS
+ *  setelah fulfillment gagal. Gagal kirim = log saja, jangan pernah melempar
+ *  (pemanggil tidak boleh gagal hanya karena notifikasi). */
+export async function notifyAdmin(text: string): Promise<void> {
+  const ids = telegramAdminIds();
+  if (ids.length === 0) return;
+  let token: string;
+  try {
+    token = telegramBotToken();
+  } catch {
+    return;
+  }
+  try {
+    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        chat_id: ids[0],
+        text,
+        parse_mode: "HTML",
+      }),
+      signal: AbortSignal.timeout(15000),
+    });
+  } catch (err) {
+    console.error(
+      "[notify] gagal kirim ke admin:",
       err instanceof Error ? err.message : String(err),
     );
   }

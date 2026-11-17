@@ -1,10 +1,10 @@
 // Harness test bot Telegram Unicodes Digital v2 (+ Web App).
 // TANPA pesan Telegram sungguhan: bot.api di-stub (semua send/edit/forward
-// direkam), fetch global di-stub (Midtrans Snap + Sondev + status API),
+// direkam), fetch global di-stub (GoPay GoID/GoBiz + Sondev + status API),
 // database = file SQLite SEMENTARA di /tmp (dev.db asli TIDAK disentuh).
 // Jalankan: npx tsx src/bot/harness.ts
 // Keluar 0 = semua lolos; 1 = ada yang gagal (nama + alasan dicetak).
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { createElement } from "react";
 import { renderToString } from "react-dom/server";
@@ -14,12 +14,16 @@ const TEST_DB = `/tmp/unicodes-harness-${Date.now()}.db`;
 process.env.DATABASE_URL = `file:${TEST_DB}`;
 process.env.TELEGRAM_BOT_TOKEN = "123456:TESTTOKEN";
 process.env.TELEGRAM_ADMIN_IDS = "807719771";
-process.env.MIDTRANS_SERVER_KEY = "test-server-key";
-process.env.MIDTRANS_CLIENT_KEY = "test-client-key";
+process.env.ADMIN_PASSWORD = "test-admin-pw";
 process.env.SONDEV_API_KEY = "test-sondev-key";
 process.env.SONDEV_API_SECRET = "test-sondev-secret";
+process.env.LAHASTORE_API_KEY = "test-laha-key";
 
-// ---- fetch stub: Midtrans + Sondev palsu, sisanya DILARANG ----
+// QRIS statis sintetis (speks EMVCo, BUKAN merchant asli) — dibuat di main()
+// dari serializeQrisPayload, lalu disimpan ke settings + dipakai mock GoBiz.
+let TEST_STATIC_QRIS = "";
+
+// ---- fetch stub: GoPay + Sondev palsu, sisanya DILARANG ----
 const SONDEV_ORDER = {
   status: "success",
   request_id: "test-req",
@@ -51,6 +55,14 @@ const stubControl = {
   sondevBalanceIdr: 100000, // saldo IDR yang dikembalikan GET /profile
   sondevFail: false, // true = semua endpoint Sondev melempar (simulasi API down)
   sondevCreateCalls: 0, // jumlah POST /orders/create yang diterima
+  // Transaksi feed GoBiz yang dikembalikan endpoint transactions
+  // ({ id, amountIdr (rupiah), timeISO?, status? }).
+  feedTransactions: [] as {
+    id: string;
+    amountIdr: number;
+    timeISO?: string;
+    status?: string;
+  }[],
 };
 
 function fakeResponse(body: unknown): Response {
@@ -72,6 +84,82 @@ interface Call {
 }
 const calls: Call[] = [];
 let midCounter = 1000;
+// Parse body request: JSON biasa, FormData, atau stream multipart mentah
+// (grammY mengirim foto Buffer sebagai multipart — body-nya Readable berisi
+// byte multipart, bukan FormData). Foto dicatat sebagai "[binary]" karena
+// isinya tidak perlu dicek di sini; caption/chat_id/reply_markup diekstrak.
+async function parseBody(init?: { body?: unknown }): Promise<Record<string, unknown>> {
+  const raw = init?.body;
+  if (raw == null) return {};
+  if (typeof raw === "string") {
+    try {
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      return {};
+    }
+  }
+  const get = (raw as { get?: unknown }).get;
+  if (typeof get === "function") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of (raw as FormData).entries()) {
+      if (k === "photo") {
+        out.photo = "[binary]";
+        continue;
+      }
+      if (k === "reply_markup" && typeof v === "string") {
+        try {
+          out.reply_markup = JSON.parse(v);
+        } catch {
+          out.reply_markup = v;
+        }
+        continue;
+      }
+      out[k] = v;
+    }
+    return out;
+  }
+  // Stream multipart (Readable): kumpulkan byte, pisah per boundary.
+  if (typeof (raw as AsyncIterable<unknown>)[Symbol.asyncIterator] === "function") {
+    const chunks: Buffer[] = [];
+    for await (const chunk of raw as AsyncIterable<Buffer | string>) {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+    }
+    const buf = Buffer.concat(chunks);
+    const firstNl = buf.indexOf("\r\n");
+    if (firstNl === -1) return {};
+    const boundary = buf.subarray(0, firstNl).toString("ascii");
+    // latin1: 1 char = 1 byte, jadi slice string -> Buffer latin1 = byte asli.
+    const text = buf.toString("latin1");
+    const out: Record<string, unknown> = {};
+    for (const part of text.split(boundary)) {
+      const sep = part.indexOf("\r\n\r\n");
+      if (sep === -1) continue;
+      const headers = part.slice(0, sep);
+      const nameMatch = /name="([^"]+)"/.exec(headers);
+      if (!nameMatch) continue;
+      const name = nameMatch[1];
+      let value = part.slice(sep + 4);
+      if (value.endsWith("\r\n")) value = value.slice(0, -2);
+      if (value === "--" || value === "--\r\n") continue;
+      if (/filename="/.test(headers)) {
+        out[name] = "[binary]";
+        continue;
+      }
+      const decoded = Buffer.from(value, "latin1").toString("utf8");
+      if (name === "reply_markup") {
+        try {
+          out[name] = JSON.parse(decoded);
+        } catch {
+          out[name] = decoded;
+        }
+      } else {
+        out[name] = decoded;
+      }
+    }
+    return out;
+  }
+  return {};
+}
 (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (
   input: unknown,
   init?: { body?: unknown },
@@ -81,13 +169,13 @@ let midCounter = 1000;
   const tgMatch = /api\.telegram\.org\/bot[^/]+\/([A-Za-z]+)$/.exec(url);
   if (tgMatch) {
     const method = tgMatch[1];
-    let body: Record<string, unknown> = {};
-    try {
-      body = JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>;
-    } catch {
-      body = {};
-    }
-    const chatId = typeof body.chat_id === "number" ? body.chat_id : undefined;
+    const body = await parseBody(init);
+    const chatId =
+      typeof body.chat_id === "number"
+        ? body.chat_id
+        : typeof body.chat_id === "string"
+          ? Number(body.chat_id)
+          : undefined;
     const text = typeof body.text === "string" ? body.text : undefined;
     if (method === "sendMessage") {
       calls.push({ method, chatId, text, keyboard: body.reply_markup });
@@ -167,26 +255,58 @@ let midCounter = 1000;
     }
     throw new Error(`HARNESS: metode Telegram tak terduga: ${method}`);
   }
-  if (url.includes("app.sandbox.midtrans.com/snap/v1/transactions")) {
+  // ---- GoPay GoID: minta OTP + token (mock mengikuti bentuk paygateme) ----
+  if (url.includes("api.gojekapi.com/goid/login/request")) {
+    return fakeResponse({ success: true, data: { otp_token: "OTP-HARNESS" } });
+  }
+  if (url.includes("api.gojekapi.com/goid/token")) {
     return fakeResponse({
-      token: "SNAP-TEST-TOKEN",
-      redirect_url: "https://snap.test/pay/TEST",
+      access_token: "AT-HARNESS",
+      refresh_token: "RT-HARNESS",
+      token_type: "Bearer",
+      expires_in: 3600,
     });
   }
-  if (url.includes("api.sandbox.midtrans.com/v2/") && url.endsWith("/status")) {
+  // ---- GoPay GoBiz: profil merchant + feed transaksi ----
+  if (url.includes("api.gobiz.co.id/v1/users/me")) {
+    return fakeResponse({ user: { id: "U-HARNESS", merchant_id: "M-HARNESS" } });
+  }
+  if (url.includes("api.gobiz.co.id/v1/merchants/")) {
     return fakeResponse({
-      transaction_status: "settlement",
-      status_code: "200",
-      gross_amount: "25000",
+      id: "M-HARNESS",
+      merchant_name: "Unicodes Digital",
+      outlet_name: "Outlet Serang",
+      phone: "081234567890",
+      email: "t@t.t",
+      pops: [
+        {
+          pop_id: "P-1",
+          name: "Outlet Serang",
+          status: "active",
+          gopay: {
+            gopay_receiver_id: "G535109406",
+            gopay_qr_string: "GOPAY-QR",
+            aspi_qr_string: TEST_STATIC_QRIS,
+          },
+        },
+      ],
     });
   }
-  // Refund Midtrans: order yang id-nya mengandung NOREFUND ditolak (simulasi
-  // refund gagal) — dipakai S27 untuk jalur "refund manual".
-  if (url.includes("api.sandbox.midtrans.com/v2/") && url.endsWith("/refund")) {
-    if (url.includes("NOREFUND")) {
-      throw new Error("HARNESS: refund ditolak");
-    }
-    return fakeResponse({ status_code: "200", transaction_status: "refund" });
+  if (url.includes("api.gobiz.co.id/merchant-analytics/v2/merchants/transactions")) {
+    const list = stubControl.feedTransactions.map((t) => ({
+      id: t.id,
+      order_id: null,
+      merchant_id: "M-HARNESS",
+      transaction_status: t.status ?? "settlement",
+      payment_type: "qris",
+      gross_amount: t.amountIdr * 100,
+      real_gross_amount: t.amountIdr * 100,
+      currency: "IDR",
+      transaction_time: t.timeISO ?? new Date().toISOString(),
+      settlement_time: null,
+      transaction_source: "qris",
+    }));
+    return fakeResponse({ from: 0, size: 100, total: list.length, transactions: list });
   }
   if (url.includes("api.sondevs.tech/api/v1/orders/create")) {
     stubControl.sondevCreateCalls += 1;
@@ -255,9 +375,38 @@ async function main(): Promise<void> {
   const { getWallet, creditWallet, getReferralStats, hasRedeemedPromo, listPromoCodes } =
     await import("../lib/wallet");
   const { getStoreOrder } = await import("../lib/orders");
-  const { handleMidtransNotification } = await import("../lib/payments/midtrans");
   const { validateInitData } = await import("../lib/telegram-webapp");
   const { getWebAppUrl, setWebAppMenuButton } = await import("./menu-button");
+  const { serializeQrisPayload } = await import("../lib/payments/qris");
+  const { setGopayStaticQris } = await import("../lib/payments/qris-settings");
+  const { gopayClient } = await import("../lib/payments/gopay");
+  const { tickQrisPayments } = await import("../lib/payments/qris-poller");
+
+  // QRIS statis sintetis (speks EMVCo — CRC dihitung serializeQrisPayload).
+  TEST_STATIC_QRIS = serializeQrisPayload([
+    { tag: "00", value: "01" },
+    { tag: "01", value: "11" },
+    {
+      tag: "26",
+      value: "0014ID.CO.QRIS.WWW011693600123456789010215ID1234567890123",
+    },
+    { tag: "52", value: "4814" },
+    { tag: "53", value: "360" },
+    { tag: "58", value: "ID" },
+    { tag: "59", value: "TOKO TEST QRIS" },
+    { tag: "60", value: "JAKARTA" },
+  ]);
+  setGopayStaticQris(TEST_STATIC_QRIS);
+  // Sesi GoBiz mock (mock fetch mengembalikan token yang sama) supaya
+  // tickQrisPayments bisa jalan tanpa login OTP sungguhan.
+  gopayClient.saveSession({
+    accessToken: "AT-HARNESS",
+    refreshToken: "RT-HARNESS",
+    tokenType: "Bearer",
+    expiresAt: Date.now() + 3600_000,
+    phone: "81234567890",
+    merchantId: "M-HARNESS",
+  });
 
   const bot = createBot();
   (bot as unknown as { botInfo: unknown }).botInfo = {
@@ -375,10 +524,16 @@ async function main(): Promise<void> {
   let err = await send(textUpdate(buyer, "/start"));
   check("/start tidak throw", err === null, err ?? undefined);
   check(
-    "/start menyapa nama + statistik + referral",
+    "/start menyapa nama + daftar produk + cara belanja, tanpa referral, tanpa statistik untuk user baru",
     lastText("sendMessage").includes("Welcome to Unicodes Digital, Budi") &&
-      lastText("sendMessage").includes("UD-111"),
-    lastText("sendMessage").slice(0, 120),
+      lastText("sendMessage").includes("Di sini kamu bisa beli") &&
+      lastText("sendMessage").includes("Muse AI Token") &&
+      lastText("sendMessage").includes("Cara belanja") &&
+      !lastText("sendMessage").includes("UD-111") &&
+      !/referral/i.test(lastText("sendMessage")) &&
+      !lastText("sendMessage").includes("Total belanja") &&
+      !lastText("sendMessage").includes("0 order"),
+    lastText("sendMessage").slice(0, 300),
   );
   check(
     "/start keyboard ada Katalog + Saldo + Referral",
@@ -452,28 +607,40 @@ async function main(): Promise<void> {
   );
   err = await send(cbUpdate(buyer, "topup:25000"));
   check("buat top-up tidak throw", err === null, err ?? undefined);
+  const topupPhoto = lastCall("sendPhoto");
   check(
-    "top-up kirim link Snap",
-    lastText("editMessageText").includes("https://snap.test/pay/TEST"),
-    lastText("editMessageText").slice(0, 120),
+    "top-up kirim foto QR (kartu standee) + caption nominal unik",
+    (topupPhoto?.text ?? "").includes("Rp25.001") &&
+      (topupPhoto?.text ?? "").includes("Isi saldo"),
+    JSON.stringify({ caption: topupPhoto?.text?.slice(0, 150) }),
   );
   const topupRow = getDb()
     .prepare("SELECT id FROM wallet_topups WHERE tg_id = ? ORDER BY created_at DESC LIMIT 1")
     .get(111) as { id: string } | undefined;
   check("baris top-up tersimpan", !!topupRow?.id);
+  const topupQrisRow = topupRow
+    ? (getDb()
+        .prepare("SELECT unique_amount_idr FROM qris_payments WHERE reference = ?")
+        .get(topupRow.id) as { unique_amount_idr: number } | undefined)
+    : undefined;
+  check(
+    "pembayaran QRIS top-up tersimpan (nominal unik 25001)",
+    topupQrisRow?.unique_amount_idr === 25001,
+    `unique=${topupQrisRow?.unique_amount_idr}`,
+  );
 
-  // ================= S6: webhook top-up -> saldo masuk (idempotent) =================
-  const topupRes = await handleMidtransNotification({
-    orderId: topupRow?.id ?? "",
-    transactionStatus: "settlement",
-  });
-  check("webhook top-up handled", topupRes.handled, topupRes.reason);
+  // ================= S6: feed GoBiz -> top-up lunas (idempotent) =================
+  stubControl.feedTransactions = [{ id: "TX-TOPUP-25001", amountIdr: 25001 }];
+  const tickTopup = await tickQrisPayments();
+  check("tick poller top-up ok", tickTopup.ok === true, tickTopup.error);
+  check("tick poller top-up match 1", tickTopup.matched === 1, JSON.stringify(tickTopup));
   check("saldo jadi Rp25.000", getWallet(111).balanceIdr === 25000);
-  await handleMidtransNotification({
-    orderId: topupRow?.id ?? "",
-    transactionStatus: "settlement",
-  });
-  check("webhook top-up idempotent (tetap 25.000)", getWallet(111).balanceIdr === 25000);
+  const tickTopup2 = await tickQrisPayments();
+  check(
+    "tick duplikat idempotent (tetap 25.000, match 0)",
+    getWallet(111).balanceIdr === 25000 && tickTopup2.matched === 0,
+    JSON.stringify(tickTopup2),
+  );
 
   // ================= S7: bayar saldo -> delivered + notifikasi =================
   await send(cbUpdate(buyer, "cat"));
@@ -500,6 +667,15 @@ async function main(): Promise<void> {
     calls.some(
       (c) => c.method === "sendMessage" && c.chatId === 111 && (c.text ?? "").includes("selesai"),
     ),
+  );
+  // Welcome menampilkan statistik setelah user punya order.
+  err = await send(textUpdate(buyer, "/start"));
+  check(
+    "welcome menampilkan statistik setelah ada order",
+    err === null &&
+      lastText().includes("📦 1 order") &&
+      lastText().includes("Total belanja: Rp1.500"),
+    lastText().slice(0, 250),
   );
 
   // ================= S8: reward referral =================
@@ -874,13 +1050,30 @@ async function main(): Promise<void> {
       lastText("editMessageText").includes("Isi saldo"),
     lastText("editMessageText").slice(0, 200),
   );
-  // Bayar via Snap (mock) -> URL Snap dihasilkan tanpa charge beneran.
-  err = await send(cbUpdate(buyer, "pay_snap"));
+  // Bayar via QRIS -> foto QR (kartu standee) dengan nominal unik, tanpa charge beneran.
+  err = await send(cbUpdate(buyer, "pay_qris"));
+  const qrisPhoto = lastCall("sendPhoto");
   check(
-    "bayar Snap menghasilkan URL Snap mock",
+    "bayar QRIS mengirim foto QR + nominal unik 10501",
     err === null &&
-      lastText("editMessageText").includes("https://snap.test/pay/TEST"),
-    lastText("editMessageText").slice(0, 200),
+      (qrisPhoto?.text ?? "").includes("Rp10.501") &&
+      (qrisPhoto?.text ?? "").includes("Order"),
+    JSON.stringify({ caption: qrisPhoto?.text?.slice(0, 200) }),
+  );
+  const awaitingOrder = getDb()
+    .prepare(
+      "SELECT id FROM store_orders WHERE buyer_ref = 'tg:111' AND status = 'awaiting_payment' ORDER BY created_at DESC LIMIT 1",
+    )
+    .get() as { id: string } | undefined;
+  const qrisOrderRow = awaitingOrder
+    ? (getDb()
+        .prepare("SELECT unique_amount_idr FROM qris_payments WHERE reference = ?")
+        .get(awaitingOrder.id) as { unique_amount_idr: number } | undefined)
+    : undefined;
+  check(
+    "pembayaran QRIS order tersimpan (nominal unik 10501)",
+    qrisOrderRow?.unique_amount_idr === 10501,
+    `unique=${qrisOrderRow?.unique_amount_idr}`,
   );
 
   // ================= S21: top-up custom =================
@@ -900,12 +1093,12 @@ async function main(): Promise<void> {
   );
   err = await send(textUpdate(buyer, "20000"));
   check(
-    "top-up custom 20000 diterima (link Snap)",
-    // startTopup dipanggil dari handler pesan teks -> render() mengirim
-    // sendMessage baru (bukan editMessageText seperti dari callback).
+    "top-up custom 20000 diterima (foto QR, nominal unik 20001)",
+    // startTopup dipanggil dari handler pesan teks -> sendQrisPhoto mengirim
+    // sendPhoto baru (bukan editMessageText seperti dari callback).
     err === null &&
-      lastText("sendMessage").includes("https://snap.test/pay/TEST"),
-    lastText("sendMessage").slice(0, 200),
+      (lastCall("sendPhoto")?.text ?? "").includes("Rp20.001"),
+    JSON.stringify({ caption: lastCall("sendPhoto")?.text?.slice(0, 150) }),
   );
 
   // ================= S22: promo tidak ditemukan / kedaluwarsa / habis =================
@@ -1003,77 +1196,91 @@ async function main(): Promise<void> {
   await send(cbUpdate(buyer, "lang:en"));
   err = await send(textUpdate(buyer, "/start"));
   check(
-    "menu EN: welcome + tombol Inggris",
+    "menu EN: welcome + tombol Inggris (tanpa referral)",
     err === null &&
       lastText("sendMessage").includes("Welcome to Unicodes Digital") &&
+      !lastText("sendMessage").includes("Referral code") &&
       kbText(lastCall("sendMessage")).includes("Product Catalog") &&
       kbText(lastCall("sendMessage")).includes("My Balance"),
-    lastText("sendMessage").slice(0, 120),
+    lastText("sendMessage").slice(0, 200),
   );
   await send(cbUpdate(buyer, "lang:id"));
 
-  // ================= S25: webhook Midtrans via route (signature + duplikat) =================
-  const { createHash } = await import("node:crypto");
-  const { POST: webhookPost } = await import(
-    "../app/api/webhooks/midtrans/route"
-  );
-  const { createTopup } = await import("../lib/wallet");
-  const signMidtrans = (
-    orderId: string,
-    statusCode: string,
-    gross: string,
-  ): string =>
-    createHash("sha512")
-      .update(`${orderId}${statusCode}${gross}test-server-key`)
-      .digest("hex");
-  const topup2 = createTopup(111, 30000);
-  const goodBody = {
-    order_id: topup2.id,
-    status_code: "200",
-    gross_amount: "30000",
-    signature_key: signMidtrans(topup2.id, "200", "30000"),
-    transaction_status: "settlement",
-  };
-  const webhookReq = (body: unknown): Request =>
-    new Request("http://x/api/webhooks/midtrans", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+  // ================= S25: route admin GoBiz (sesi + merchant + poll) =================
+  // Cookie admin = sha256(ADMIN_PASSWORD) — ADMIN_PASSWORD di-set di env atas.
+  const adminCookie = `unicodes_admin=${createHash("sha256").update("test-admin-pw").digest("hex")}`;
+  const gopayReq = (path: string, method = "GET", body?: unknown): Request =>
+    new Request(`http://x${path}`, {
+      method,
+      headers: { "Content-Type": "application/json", cookie: adminCookie },
+      body: body === undefined ? undefined : JSON.stringify(body),
     });
-  const balBeforeWebhook = getWallet(111).balanceIdr;
-  let wres = await webhookPost(webhookReq(goodBody));
-  check(
-    "webhook signature benar -> 200 + saldo masuk sekali",
-    wres.status === 200 && getWallet(111).balanceIdr === balBeforeWebhook + 30000,
-    `status ${wres.status}, saldo ${getWallet(111).balanceIdr}`,
+  const { GET: sessionGet } = await import(
+    "../app/api/admin/payments/gopay/session/route"
   );
-  wres = await webhookPost(webhookReq(goodBody));
-  check(
-    "webhook top-up duplikat -> tetap 200, saldo tidak dobel",
-    wres.status === 200 && getWallet(111).balanceIdr === balBeforeWebhook + 30000,
-    `status ${wres.status}, saldo ${getWallet(111).balanceIdr}`,
+  const { GET: merchantGet } = await import(
+    "../app/api/admin/payments/gopay/merchant/route"
   );
-  const badBody = { ...goodBody, signature_key: "0".repeat(128) };
-  wres = await webhookPost(webhookReq(badBody));
+  const { POST: pollPost } = await import(
+    "../app/api/admin/payments/gopay/poll/route"
+  );
+  const noAuthRes = await sessionGet(
+    new Request("http://x/api/admin/payments/gopay/session"),
+  );
+  check("admin GoPay tanpa cookie -> 401", noAuthRes.status === 401);
+  const sres = await sessionGet(
+    gopayReq("/api/admin/payments/gopay/session"),
+  );
+  const sbody = (await sres.json()) as { authenticated?: boolean; phone?: string };
   check(
-    "webhook signature salah -> 401, saldo tidak berubah",
-    wres.status === 401 && getWallet(111).balanceIdr === balBeforeWebhook + 30000,
-    `status ${wres.status}`,
+    "admin GoPay session: login + HP 812...",
+    sres.status === 200 && sbody.authenticated === true && sbody.phone === "81234567890",
+    JSON.stringify(sbody),
+  );
+  const mres = await merchantGet(
+    gopayReq("/api/admin/payments/gopay/merchant"),
+  );
+  const mbody = (await mres.json()) as {
+    staticQrisMatches?: boolean;
+    profile?: { merchantName?: string };
+  };
+  check(
+    "admin GoPay merchant: cocok dengan QRIS statis",
+    mres.status === 200 &&
+      mbody.staticQrisMatches === true &&
+      mbody.profile?.merchantName === "Unicodes Digital",
+    JSON.stringify(mbody).slice(0, 200),
+  );
+  stubControl.feedTransactions = [];
+  const pres = await pollPost(
+    gopayReq("/api/admin/payments/gopay/poll", "POST"),
+  );
+  const pbody = (await pres.json()) as { ok?: boolean; matched?: number };
+  check(
+    "admin GoPay poll manual -> ok, tidak ada match",
+    pres.status === 200 && pbody.ok === true && pbody.matched === 0,
+    JSON.stringify(pbody),
   );
 
-  // ================= S26: webhook duplikat order produk =================
+  // ================= S26: feed duplikat -> order ter-fulfill sekali =================
   // (createStoreOrder sudah diimpor di S14 — pakai ulang di sini.)
+  const { createQrisPayment } = await import("../lib/payments/qris");
   const dupOrder = await createStoreOrder({
     catalogProductId: "muse-token-1b",
     quantity: 1,
     buyerRef: "tg:111",
     target: "https://muse.ai/invite/123",
   });
-  const r1 = await handleMidtransNotification({
-    orderId: dupOrder.id,
-    transactionStatus: "settlement",
+  const { payment: dupQris } = createQrisPayment({
+    reference: dupOrder.id,
+    amountIdr: 1500,
+    staticPayload: TEST_STATIC_QRIS,
   });
-  check("webhook order pertama handled", r1.handled, r1.reason);
+  stubControl.feedTransactions = [
+    { id: "TX-DUP-1", amountIdr: dupQris.unique_amount_idr },
+  ];
+  const tickDup1 = await tickQrisPayments();
+  check("tick pertama melunasi order", tickDup1.matched === 1, JSON.stringify(tickDup1));
   // Tunggu fulfill background (mock Sondev cepat) selesai.
   for (let i = 0; i < 50; i++) {
     const o = await getStoreOrder(dupOrder.id);
@@ -1081,19 +1288,17 @@ async function main(): Promise<void> {
     await new Promise((r) => setTimeout(r, 100));
   }
   check(
-    "order webhook terkirim delivered",
+    "order feed terkirim delivered",
     (await getStoreOrder(dupOrder.id))?.status === "delivered",
     (await getStoreOrder(dupOrder.id))?.status ?? "?",
   );
   const createsAfterFirst = stubControl.sondevCreateCalls;
-  const r2 = await handleMidtransNotification({
-    orderId: dupOrder.id,
-    transactionStatus: "settlement",
-  });
-  check("webhook order duplikat handled", r2.handled, r2.reason);
+  // Feed yang SAMA dikirim lagi (duplikat) -> tick tidak memproses ulang.
+  const tickDup2 = await tickQrisPayments();
+  check("tick duplikat tidak melunasi lagi", tickDup2.matched === 0, JSON.stringify(tickDup2));
   await new Promise((r) => setTimeout(r, 300));
   check(
-    "webhook duplikat tidak membuat order Sondev kedua",
+    "feed duplikat tidak membuat order Sondev kedua",
     stubControl.sondevCreateCalls === createsAfterFirst,
     `creates ${createsAfterFirst} -> ${stubControl.sondevCreateCalls}`,
   );
@@ -1128,40 +1333,44 @@ async function main(): Promise<void> {
     getWallet(111).balanceIdr === balA,
     `saldo ${getWallet(111).balanceIdr} vs ${balA}`,
   );
-  // (b) Bayar Snap -> refund Midtrans (mock) -> refunded.
-  const failSnap = await createStoreOrder({
+  // (b) Bayar QRIS -> TIDAK ADA refund otomatis: status failed + catatan
+  // refund manual + notifikasi ke admin.
+  const failQris = await createStoreOrder({
     id: "UD-FAIL-2",
     catalogProductId: "muse-token-1b",
     quantity: 1,
     buyerRef: "tg:111",
     target: "https://muse.ai/invite/123",
   });
-  await markPaid(failSnap.id);
-  const doneB = await fulfillOrder(failSnap.id);
+  await setOrderPaidVia(failQris.id, "qris");
+  await markPaid(failQris.id);
+  const doneB = await fulfillOrder(failQris.id);
   check(
-    "fulfill gagal (Snap): status refunded",
-    doneB.status === "refunded",
+    "fulfill gagal (QRIS): status failed (bukan refunded)",
+    doneB.status === "failed",
     doneB.status,
   );
-  // (c) Bayar Snap + refund ditolak -> tetap failed + catatan manual.
-  const failNoRefund = await createStoreOrder({
-    id: "UD-FAIL-NOREFUND",
-    catalogProductId: "muse-token-1b",
-    quantity: 1,
-    buyerRef: "tg:111",
-    target: "https://muse.ai/invite/123",
-  });
-  await markPaid(failNoRefund.id);
-  const doneC = await fulfillOrder(failNoRefund.id);
   check(
-    "fulfill gagal + refund ditolak: status tetap failed",
-    doneC.status === "failed",
-    doneC.status,
+    "fulfill gagal (QRIS): ada catatan refund manual",
+    (doneB.error ?? "").includes("manual"),
+    doneB.error ?? "",
   );
+  // notifyAdmin jalan fire-and-forget — tunggu sebentar supaya fetch stub
+  // sempat mencatat pesan ke admin.
+  await new Promise((r) => setTimeout(r, 300));
   check(
-    "fulfill gagal + refund ditolak: ada catatan refund manual",
-    (doneC.error ?? "").includes("manual"),
-    doneC.error ?? "",
+    "fulfill gagal (QRIS): admin diberi tahu soal refund manual",
+    calls.some(
+      (c) =>
+        c.method === "sendMessage" &&
+        c.chatId === 807719771 &&
+        (c.text ?? "").includes("Refund manual"),
+    ),
+    JSON.stringify(
+      calls
+        .filter((c) => c.chatId === 807719771)
+        .map((c) => c.text?.slice(0, 60)),
+    ),
   );
 
   // ================= S28: cek saldo supplier via route order =================
@@ -1193,11 +1402,13 @@ async function main(): Promise<void> {
   ores = await orderPost(orderReq(orderBody));
   const oresBody2 = (await ores.json()) as {
     ok: boolean;
-    payment?: { redirectUrl: string };
+    payment?: { qrPngBase64: string; uniqueAmountIdr: number };
   };
   check(
-    "supplier API error: fail open, order + Snap tetap jalan",
-    ores.status === 201 && !!oresBody2.payment?.redirectUrl,
+    "supplier API error: fail open, order + QRIS tetap jalan",
+    ores.status === 201 &&
+      !!oresBody2.payment?.qrPngBase64 &&
+      oresBody2.payment?.uniqueAmountIdr === 1501,
     `status ${ores.status}`,
   );
   stubControl.sondevFail = false;
@@ -1235,6 +1446,127 @@ async function main(): Promise<void> {
       lastText("editMessageText").includes("Welcome to Unicodes Digital"),
     lastText("editMessageText").slice(0, 120),
   );
+
+  // ================= S30: poller — order lunas, sesi habis, QR kedaluwarsa =================
+  // (a) Order QRIS lunas via feed -> delivered + notifikasi pembeli.
+  const pollOrder = await createStoreOrder({
+    catalogProductId: "muse-token-1b",
+    quantity: 1,
+    buyerRef: "tg:111",
+    target: "https://muse.ai/invite/123",
+  });
+  const { payment: pollQris } = createQrisPayment({
+    reference: pollOrder.id,
+    amountIdr: 1500,
+    staticPayload: TEST_STATIC_QRIS,
+  });
+  stubControl.feedTransactions = [
+    { id: "TX-POLL-1", amountIdr: pollQris.unique_amount_idr },
+  ];
+  const tickPoll = await tickQrisPayments();
+  check("poller: order QRIS lunas via feed", tickPoll.matched === 1, JSON.stringify(tickPoll));
+  for (let i = 0; i < 50; i++) {
+    const o = await getStoreOrder(pollOrder.id);
+    if (o?.status === "delivered") break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  check(
+    "poller: order ter-fulfill delivered",
+    (await getStoreOrder(pollOrder.id))?.status === "delivered",
+    (await getStoreOrder(pollOrder.id))?.status ?? "?",
+  );
+  check(
+    "poller: notifikasi selesai ke pembeli",
+    calls.some(
+      (c) => c.method === "sendMessage" && c.chatId === 111 && (c.text ?? "").includes("selesai"),
+    ),
+  );
+  // (b) Sesi GoBiz kedaluwarsa -> error jelas + tick tidak throw.
+  gopayClient.clearSession();
+  const tickNoSession = await tickQrisPayments();
+  check(
+    "poller: sesi GoBiz habis -> error jelas (auth_required), tidak throw",
+    tickNoSession.ok === false && tickNoSession.code === "auth_required",
+    JSON.stringify(tickNoSession),
+  );
+  // Pulihkan sesi untuk skenario berikut.
+  gopayClient.saveSession({
+    accessToken: "AT-HARNESS",
+    refreshToken: "RT-HARNESS",
+    tokenType: "Bearer",
+    expiresAt: Date.now() + 3600_000,
+    phone: "81234567890",
+    merchantId: "M-HARNESS",
+  });
+  // (c) QR kedaluwarsa -> order dibatalkan.
+  const expOrder = await createStoreOrder({
+    catalogProductId: "muse-token-1b",
+    quantity: 1,
+    buyerRef: "tg:111",
+    target: "https://muse.ai/invite/123",
+  });
+  createQrisPayment({
+    reference: expOrder.id,
+    amountIdr: 1500,
+    staticPayload: TEST_STATIC_QRIS,
+  });
+  // Buat QR kedaluwarsa (tanpa menunggu 5 menit): mundurkan expires_at-nya.
+  getDb()
+    .prepare("UPDATE qris_payments SET expires_at = ? WHERE reference = ?")
+    .run(new Date(Date.now() - 1000).toISOString(), expOrder.id);
+  stubControl.feedTransactions = [];
+  const tickExp = await tickQrisPayments();
+  check("poller: QR kedaluwarsa disapu", tickExp.expired >= 1, JSON.stringify(tickExp));
+  const expDone = await getStoreOrder(expOrder.id);
+  check(
+    "poller: order QR kedaluwarsa dibatalkan",
+    expDone?.status === "failed" && (expDone?.error ?? "").includes("kedaluwarsa"),
+    `${expDone?.status ?? "?"}: ${expDone?.error ?? ""}`,
+  );
+
+  // ================= S31: GoPay OTP via route admin =================
+  // (Terakhir — verify/logout mengubah sesi; tidak ada skenario setelah ini.)
+  const { POST: otpPost } = await import(
+    "../app/api/admin/payments/gopay/otp/route"
+  );
+  const { POST: verifyPost } = await import(
+    "../app/api/admin/payments/gopay/verify/route"
+  );
+  const { POST: logoutPost } = await import(
+    "../app/api/admin/payments/gopay/logout/route"
+  );
+  const otpRes = await otpPost(
+    gopayReq("/api/admin/payments/gopay/otp", "POST", { phone: "081234567890" }),
+  );
+  const otpBody = (await otpRes.json()) as { ok?: boolean; phone?: string };
+  check(
+    "GoPay OTP: minta OTP berhasil, otp_token tidak bocor ke client",
+    otpRes.status === 200 &&
+      otpBody.ok === true &&
+      otpBody.phone === "81234567890" &&
+      !JSON.stringify(otpBody).includes("OTP-HARNESS"),
+    JSON.stringify(otpBody),
+  );
+  const badOtpRes = await verifyPost(
+    gopayReq("/api/admin/payments/gopay/verify", "POST", { otp: "ab" }),
+  );
+  check("GoPay OTP: format salah ditolak 400", badOtpRes.status === 400);
+  const vRes = await verifyPost(
+    gopayReq("/api/admin/payments/gopay/verify", "POST", { otp: "123456" }),
+  );
+  const vBody = (await vRes.json()) as {
+    ok?: boolean;
+    session?: { authenticated?: boolean };
+  };
+  check(
+    "GoPay OTP: verifikasi berhasil, sesi login",
+    vRes.status === 200 && vBody.ok === true && vBody.session?.authenticated === true,
+    JSON.stringify(vBody),
+  );
+  await logoutPost(gopayReq("/api/admin/payments/gopay/logout", "POST"));
+  const sAfter = await sessionGet(gopayReq("/api/admin/payments/gopay/session"));
+  const sAfterBody = (await sAfter.json()) as { authenticated?: boolean };
+  check("GoPay logout: sesi terhapus", sAfterBody.authenticated === false);
 
   // ---- ringkasan ----
   const failed = results.filter((r) => !r.ok);

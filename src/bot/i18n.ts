@@ -8,8 +8,18 @@ export type { Lang };
 
 export const rupiah = (n: number): string => `Rp${n.toLocaleString("id-ID")}`;
 
+/** Jam (HH:mm) dari ISO string, zona WIB — untuk kedaluwarsa QR di caption. */
+export const wibTime = (iso: string): string =>
+  new Date(iso).toLocaleTimeString("id-ID", {
+    timeZone: "Asia/Jakarta",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+
 export interface Strings {
-  welcome: (name: string, orders: number, spent: number, refCode: string) => string;
+  // Sapaan /start: nama + statistik order (hanya kalau orders > 0).
+  // Referral SENGAJA tidak ada di sini — hanya di menu 🎁 Referral.
+  welcome: (name: string, orders: number, spent: number) => string;
   menuPrompt: string;
   catalog: string;
   myBalance: string;
@@ -55,19 +65,22 @@ export interface Strings {
     balance: number;
   }) => string;
   payWallet: string;
-  paySnap: string;
+  payQris: string;
   payWalletShort: string;
   walletInsufficient: string;
   walletPaid: (orderId: string) => string;
   walletRefunded: string;
-  snapLink: (orderId: string, total: number, url: string) => string;
-  snapFailed: string;
+  /** Caption foto QR order: nominal unik + kedaluwarsa (jam WIB). */
+  qrisLink: (orderId: string, total: number, uniqueAmount: number, expiresAt: string) => string;
+  /** Pesan gagal membuat QR (dengan alasan, kalau ada). */
+  qrisFailed: (reason?: string) => string;
   freeOrderDone: (orderId: string) => string;
   walletTitle: (balance: number, totalTopup: number, totalSpent: number) => string;
   topupTitle: string;
   topupCustomPrompt: string;
   topupInvalid: string;
-  topupCreated: (amount: number, url: string) => string;
+  /** Caption foto QR top-up: nominal unik + kedaluwarsa (jam WIB). */
+  topupCreated: (amount: number, uniqueAmount: number, expiresAt: string) => string;
   topupFailed: string;
   txnsTitle: string;
   txnsEmpty: string;
@@ -113,11 +126,16 @@ export interface Strings {
 }
 
 const id: Strings = {
-  welcome: (name, orders, spent, refCode) =>
+  welcome: (name, orders, spent) =>
     `⚡ Welcome to Unicodes Digital, ${name}! 💜\n\n` +
-    `Toko AI & produk digital — harga jujur, proses instan, gagal = uang kembali.\n\n` +
-    `📦 Pesanan kamu: ${orders} order • Total belanja: ${rupiah(spent)}\n` +
-    `🎁 Kode referral kamu: <code>${refCode}</code> — undang teman, dapat ${rupiah(1500)} per teman yang order pertama.\n\n` +
+    `Toko AI & produk digital — harga jujur, proses instan.\n\n` +
+    `🛍️ Di sini kamu bisa beli:\n` +
+    `• Muse AI Token — recharge 1B sampai 30B\n` +
+    `• Gemini & produk AI lainnya (segera hadir)\n\n` +
+    `💳 Cara belanja: pilih produk → bayar via QRIS → token langsung dikirim ke akun kamu. Atau isi saldo dulu di menu Saldo Saya, biar checkout berikutnya lebih cepat.\n\n` +
+    (orders > 0
+      ? `📦 ${orders} order • Total belanja: ${rupiah(spent)}\n\n`
+      : "") +
     `Pilih menu di bawah untuk mulai:`,
   menuPrompt: "Pilih menu di bawah:",
   catalog: "🛍️ Katalog Produk",
@@ -171,19 +189,22 @@ const id: Strings = {
     `Total bayar: <b>${rupiah(p.total)}</b>\n` +
     `💳 Saldo kamu: ${rupiah(p.balance)}\n\nPilih cara bayar:`,
   payWallet: "💳 Bayar dari Saldo",
-  paySnap: "🔗 Bayar via QRIS / E-Wallet / VA",
+  payQris: "💳 Bayar via QRIS",
   payWalletShort: "💳 Saldo",
   walletInsufficient:
-    "❌ Saldo kamu tidak cukup untuk order ini. Isi saldo dulu atau bayar via Midtrans.",
+    "❌ Saldo kamu tidak cukup untuk order ini. Isi saldo dulu atau bayar via QRIS.",
   walletPaid: (orderId) =>
     `✅ Dibayar dari saldo! Order ${orderId} sedang diproses ke supplier…`,
   walletRefunded: "Saldo sudah dikembalikan ke dompet kamu.",
-  snapLink: (orderId, total, url) =>
-    `🧾 Order ${orderId} dibuat — total ${rupiah(total)}.\n\nBayar di sini: ${url}\n\n` +
-    `Setelah bayar lunas, order otomatis diteruskan ke supplier dan hasilnya dikirim ke chat ini. ` +
-    `Lacak dengan /order ${orderId}`,
-  snapFailed:
-    "❌ Pembayaran belum bisa dibuat sekarang. Coba lagi nanti atau hubungi admin.",
+  qrisLink: (orderId, total, uniqueAmount, expiresAt) =>
+    `🧾 Order ${orderId} dibuat — total ${rupiah(total)}.\n\n` +
+    `Scan QR di atas dengan aplikasi apa pun (GoPay, OVO, DANA, m-banking):\n` +
+    `• Nominal: <b>${rupiah(uniqueAmount)}</b> — HARUS pas, jangan dibulatkan\n` +
+    `• Berlaku sampai: ${wibTime(expiresAt)} WIB (5 menit)\n\n` +
+    `Setelah dibayar, order otomatis diteruskan ke supplier dan hasilnya dikirim ke chat ini. ` +
+    `Kalau QR kedaluwarsa, buat order baru dari katalog. Lacak dengan /order ${orderId}`,
+  qrisFailed: (reason) =>
+    `❌ QR pembayaran belum bisa dibuat sekarang.${reason ? `\nAlasan: ${reason}` : ""}\n\nCoba lagi nanti atau hubungi admin.`,
   freeOrderDone: (orderId) =>
     `✅ Order ${orderId} gratis berkat promo — langsung diproses ke supplier…`,
   walletTitle: (balance, totalTopup, totalSpent) =>
@@ -194,9 +215,11 @@ const id: Strings = {
   topupCustomPrompt:
     "Ketik nominal isi saldo (angka, minimal 10000), atau /cancel untuk batal.",
   topupInvalid: "Nominal harus angka minimal 10000. Coba lagi, atau /cancel untuk batal.",
-  topupCreated: (amount, url) =>
-    `💳 Isi saldo ${rupiah(amount)}.\n\nBayar di sini: ${url}\n\nSaldo masuk otomatis setelah pembayaran lunas.`,
-  topupFailed: "❌ Link pembayaran belum bisa dibuat. Coba lagi nanti.",
+  topupCreated: (amount, uniqueAmount, expiresAt) =>
+    `💳 Isi saldo ${rupiah(amount)}.\n\nScan QR di atas:\n` +
+    `• Nominal: <b>${rupiah(uniqueAmount)}</b> — HARUS pas, jangan dibulatkan\n` +
+    `• Berlaku sampai: ${wibTime(expiresAt)} WIB (5 menit)\n\nSaldo masuk otomatis setelah pembayaran lunas.`,
+  topupFailed: "❌ QR pembayaran belum bisa dibuat. Coba lagi nanti.",
   txnsTitle: "📜 <b>Riwayat Dompet</b>\n\n10 transaksi terakhir:",
   txnsEmpty: "Belum ada transaksi dompet.",
   txnLine: (t) =>
@@ -244,9 +267,9 @@ const id: Strings = {
   policyTitle:
     "📜 <b>Kebijakan Toko</b>\n\n" +
     "🚀 <b>Pengiriman</b>\nProduk digital dikirim instan setelah pembayaran lunas. Proses ke supplier maksimal 10 menit — kalau lebih dari itu, hubungi support.\n\n" +
-    "↩️ <b>Refund</b>\nKalau fulfillment gagal setelah kamu bayar, uang kembali otomatis: via Midtrans (bayar QRIS/e-wallet/VA) atau kembali ke dompet (bayar saldo).\n\n" +
+    "↩️ <b>Refund</b>\nKalau fulfillment gagal setelah kamu bayar: bayar saldo kembali ke dompet otomatis; bayar QRIS ditransfer balik manual oleh admin (maks. 1 hari kerja) — hubungi support kalau belum masuk.\n\n" +
     "🛡️ <b>Garansi</b>\nAkun bergaransi penggantian 1 hari sejak diterima, selama dipakai sesuai aturan produk. Token yang sudah dipakai tidak bisa digaransi.\n\n" +
-    "💳 <b>Pembayaran</b>\nQRIS, e-wallet (GoPay/OVO/DANA), dan virtual account — via Midtrans. Bisa juga bayar dari saldo dompet.\n\n" +
+    "💳 <b>Pembayaran</b>\nQRIS dinamis (GoPay, OVO, DANA, m-banking apa pun) atau saldo dompet.\n\n" +
     "📩 <b>Bantuan</b>\nSupport: @Dimas0227",
   resellerTitle:
     "🤝 <b>Reseller & API</b>\n\nProgram reseller & API akses masih disiapkan — segera hadir.\n\nMau jadi reseller Unicodes Digital lebih awal? Hubungi admin: @Dimas0227",
@@ -268,11 +291,16 @@ const id: Strings = {
 };
 
 const en: Strings = {
-  welcome: (name, orders, spent, refCode) =>
+  welcome: (name, orders, spent) =>
     `⚡ Welcome to Unicodes Digital, ${name}! 💜\n\n` +
-    `AI & digital products store — honest prices, instant delivery, failed = refunded.\n\n` +
-    `📦 Your orders: ${orders} • Total spent: ${rupiah(spent)}\n` +
-    `🎁 Your referral code: <code>${refCode}</code> — invite friends, earn ${rupiah(1500)} per friend's first order.\n\n` +
+    `AI & digital products store — honest prices, instant delivery.\n\n` +
+    `🛍️ Here you can buy:\n` +
+    `• Muse AI Token — 1B to 30B recharge\n` +
+    `• Gemini & other AI products (coming soon)\n\n` +
+    `💳 How to shop: pick a product → pay via QRIS → the token is sent straight to your account. Or top up your balance in the My Balance menu first, so your next checkout is faster.\n\n` +
+    (orders > 0
+      ? `📦 ${orders} ${orders === 1 ? "order" : "orders"} • Total spent: ${rupiah(spent)}\n\n`
+      : "") +
     `Pick a menu below to start:`,
   menuPrompt: "Pick a menu below:",
   catalog: "🛍️ Product Catalog",
@@ -325,18 +353,22 @@ const en: Strings = {
     `Total to pay: <b>${rupiah(p.total)}</b>\n` +
     `💳 Your balance: ${rupiah(p.balance)}\n\nChoose a payment method:`,
   payWallet: "💳 Pay from Balance",
-  paySnap: "🔗 Pay via QRIS / E-Wallet / VA",
+  payQris: "💳 Pay via QRIS",
   payWalletShort: "💳 Balance",
   walletInsufficient:
-    "❌ Your balance isn't enough for this order. Top up first or pay via Midtrans.",
+    "❌ Your balance isn't enough for this order. Top up first or pay via QRIS.",
   walletPaid: (orderId) =>
     `✅ Paid from balance! Order ${orderId} is being processed…`,
   walletRefunded: "Your balance has been refunded to your wallet.",
-  snapLink: (orderId, total, url) =>
-    `🧾 Order ${orderId} created — total ${rupiah(total)}.\n\nPay here: ${url}\n\n` +
+  qrisLink: (orderId, total, uniqueAmount, expiresAt) =>
+    `🧾 Order ${orderId} created — total ${rupiah(total)}.\n\n` +
+    `Scan the QR above with any app (GoPay, OVO, DANA, mobile banking):\n` +
+    `• Amount: <b>${rupiah(uniqueAmount)}</b> — must match exactly, don't round it\n` +
+    `• Valid until: ${wibTime(expiresAt)} WIB (5 minutes)\n\n` +
     `Once paid, the order is forwarded to the supplier automatically and the result is sent to this chat. ` +
-    `Track it with /order ${orderId}`,
-  snapFailed: "❌ Payment couldn't be created right now. Try again later or contact support.",
+    `If the QR expires, create a new order from the catalog. Track it with /order ${orderId}`,
+  qrisFailed: (reason) =>
+    `❌ Payment QR couldn't be created right now.${reason ? `\nReason: ${reason}` : ""}\n\nTry again later or contact support.`,
   freeOrderDone: (orderId) =>
     `✅ Order ${orderId} is free thanks to the promo — processing it right away…`,
   walletTitle: (balance, totalTopup, totalSpent) =>
@@ -346,9 +378,11 @@ const en: Strings = {
   topupTitle: "➕ <b>Top Up</b>\n\nPick an amount, or type your own (minimum Rp10.000).",
   topupCustomPrompt: "Type the top-up amount (a number, minimum 10000), or /cancel to abort.",
   topupInvalid: "Amount must be a number of at least 10000. Try again, or /cancel to abort.",
-  topupCreated: (amount, url) =>
-    `💳 Top up ${rupiah(amount)}.\n\nPay here: ${url}\n\nBalance is credited automatically once the payment settles.`,
-  topupFailed: "❌ Payment link couldn't be created. Try again later.",
+  topupCreated: (amount, uniqueAmount, expiresAt) =>
+    `💳 Top up ${rupiah(amount)}.\n\nScan the QR above:\n` +
+    `• Amount: <b>${rupiah(uniqueAmount)}</b> — must match exactly\n` +
+    `• Valid until: ${wibTime(expiresAt)} WIB (5 minutes)\n\nBalance is credited automatically once the payment settles.`,
+  topupFailed: "❌ Payment QR couldn't be created. Try again later.",
   txnsTitle: "📜 <b>Wallet History</b>\n\nLast 10 transactions:",
   txnsEmpty: "No wallet transactions yet.",
   txnLine: (t) =>
@@ -396,9 +430,9 @@ const en: Strings = {
   policyTitle:
     "📜 <b>Store Policy</b>\n\n" +
     "🚀 <b>Delivery</b>\nDigital products are delivered instantly after payment. Supplier processing takes at most 10 minutes — if it takes longer, contact support.\n\n" +
-    "↩️ <b>Refund</b>\nIf fulfillment fails after you paid, money is refunded automatically: via Midtrans (QRIS/e-wallet/VA payments) or back to your wallet (balance payments).\n\n" +
+    "↩️ <b>Refund</b>\nIf fulfillment fails after you paid: balance payments go back to your wallet automatically; QRIS payments are refunded manually by the admin (max 1 business day) — contact support if it hasn't arrived.\n\n" +
     "🛡️ <b>Warranty</b>\nAccounts come with a 1-day replacement warranty from delivery, when used per the product rules. Tokens already used can't be warrantied.\n\n" +
-    "💳 <b>Payment</b>\nQRIS, e-wallets (GoPay/OVO/DANA), and virtual accounts — via Midtrans. You can also pay from your wallet balance.\n\n" +
+    "💳 <b>Payment</b>\nDynamic QRIS (GoPay, OVO, DANA, any mobile banking) or wallet balance.\n\n" +
     "📩 <b>Help</b>\nSupport: @Dimas0227",
   resellerTitle:
     "🤝 <b>Reseller & API</b>\n\nThe reseller & API program is still being prepared — coming soon.\n\nWant to become a Unicodes Digital reseller early? Contact admin: @Dimas0227",

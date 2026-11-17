@@ -1,5 +1,6 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 import { NextResponse } from "next/server";
+import { sondevConfig } from "@/lib/config";
 import { recordWebhookDelivery } from "@/lib/db";
 import {
   getStoreOrder,
@@ -45,8 +46,10 @@ function verifySignature(
 }
 
 export async function POST(req: Request) {
-  const secret = process.env.SONDEV_API_SECRET;
-  if (!secret) {
+  let secret: string;
+  try {
+    secret = sondevConfig().apiSecret;
+  } catch {
     return NextResponse.json({ ok: false, error: "SONDEV_API_SECRET belum diisi" }, { status: 500 });
   }
   const rawBody = await req.text();

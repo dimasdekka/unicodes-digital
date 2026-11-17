@@ -4,7 +4,7 @@ import { fulfillOrder, getStoreOrder, markPaid } from "@/lib/orders";
 /**
  * POST /api/orders/[id]/fulfill — JALANKAN FULFILLMENT (testing/admin saja).
  * TODO PRODUKSI: lindungi route ini (admin auth) dan panggil HANYA setelah
- * pembayaran terkonfirmasi (webhook Midtrans -> markPaid -> fulfillOrder).
+ * pembayaran terkonfirmasi (poller QRIS -> markPaid -> fulfillOrder).
  * Di sini markPaid dipanggil otomatis supaya bisa dites end-to-end tanpa
  * payment gateway dulu.
  */
