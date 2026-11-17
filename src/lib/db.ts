@@ -134,6 +134,13 @@ function openDb(): DatabaseSync {
     );
     CREATE INDEX IF NOT EXISTS idx_qris_payments_status ON qris_payments(status, unique_amount_idr);
     CREATE INDEX IF NOT EXISTS idx_qris_payments_ref ON qris_payments(reference);
+    -- Pengaturan admin (key-value): mis. string QRIS statis GoPay.
+    -- Nilai rahasia di sini TIDAK boleh di-commit (hanya di database).
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
   // Migrasi ringan: tambah kolom target kalau belum ada (order lama tetap jalan).
   const cols = db
@@ -180,4 +187,25 @@ export function recordWebhookDelivery(
     )
     .run(deliveryId, source, new Date().toISOString());
   return result.changes > 0;
+}
+
+// ---------------------------------------------------------------------------
+// Settings admin (key-value generik)
+// ---------------------------------------------------------------------------
+
+/** Baca satu setting; undefined kalau key belum pernah disimpan. */
+export function getSetting(key: string): string | undefined {
+  const row = getDb()
+    .prepare("SELECT value FROM settings WHERE key = ?")
+    .get(key) as { value: string } | undefined;
+  return row?.value;
+}
+
+/** Simpan/ubah satu setting (upsert). */
+export function setSetting(key: string, value: string): void {
+  getDb()
+    .prepare(
+      "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+    )
+    .run(key, value, new Date().toISOString());
 }

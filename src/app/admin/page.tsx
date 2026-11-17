@@ -4,6 +4,11 @@ import { listStoreOrders } from "@/lib/orders";
 import { getSupplier } from "@/lib/suppliers";
 import type { SupplierId } from "@/lib/suppliers/types";
 import { ADMIN_COOKIE, adminPasswordHash, isAdminCookieValid } from "@/lib/admin-auth";
+import {
+  extractMerchantInfo,
+  getGopayStaticQris,
+} from "@/lib/payments/qris-settings";
+import QrisPanel, { type QrisStatus } from "./qris-panel";
 
 // Halaman admin dilindungi login password (cookie, lihat /api/admin/login).
 // Tanpa ADMIN_PASSWORD di env, halaman tidak bisa dibuka siapa pun.
@@ -93,6 +98,33 @@ export default async function AdminPage({
   ]);
   const products = listActiveProducts();
 
+  // Status awal QRIS GoPay untuk panel (string lengkap tidak dikirim ke client).
+  const storedQris = getGopayStaticQris();
+  let qrisStatus: QrisStatus = {
+    configured: false,
+    merchant_name: null,
+    merchant_city: null,
+    merchant_id: null,
+  };
+  if (storedQris) {
+    try {
+      const info = extractMerchantInfo(storedQris);
+      qrisStatus = {
+        configured: true,
+        merchant_name: info.merchantName,
+        merchant_city: info.merchantCity,
+        merchant_id: info.merchantId,
+      };
+    } catch {
+      qrisStatus = {
+        configured: true,
+        merchant_name: null,
+        merchant_city: null,
+        merchant_id: null,
+      };
+    }
+  }
+
   return (
     <>
       <h1>Admin — Unicodes Digital</h1>
@@ -127,6 +159,9 @@ export default async function AdminPage({
         Isi saldo sebelum kehabisan — kalau saldo kurang, order baru akan gagal
         dan pembeli harus di-refund manual.
       </p>
+
+      <h2>Pembayaran — QRIS GoPay</h2>
+      <QrisPanel initialStatus={qrisStatus} />
 
       <h2>Produk &amp; harga retail</h2>
       <ul>
