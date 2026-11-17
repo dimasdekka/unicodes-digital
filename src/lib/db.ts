@@ -119,6 +119,21 @@ function openDb(): DatabaseSync {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS idx_referrals_referrer ON referrals(referrer_tg_id);
+    -- Pembayaran QRIS dinamis (Fase 1): satu baris per QR yang dibuat.
+    -- unique_amount_idr = nominal + delta unik; matcher memakai nominal ini
+    -- untuk membedakan pembayaran yang nominal dasarnya sama.
+    CREATE TABLE IF NOT EXISTS qris_payments (
+      id TEXT PRIMARY KEY,
+      reference TEXT NOT NULL,
+      amount_idr INTEGER NOT NULL,
+      unique_amount_idr INTEGER NOT NULL,
+      qr_string TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_qris_payments_status ON qris_payments(status, unique_amount_idr);
+    CREATE INDEX IF NOT EXISTS idx_qris_payments_ref ON qris_payments(reference);
   `);
   // Migrasi ringan: tambah kolom target kalau belum ada (order lama tetap jalan).
   const cols = db
