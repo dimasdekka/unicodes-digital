@@ -87,6 +87,7 @@ interface Call {
   keyboard?: unknown;
   data?: unknown;
   photo?: string;
+  token?: string;
 }
 const calls: Call[] = [];
 let midCounter = 1000;
@@ -172,9 +173,10 @@ async function parseBody(init?: { body?: unknown }): Promise<Record<string, unkn
 ) => {
   const url = String(input);
   // ---- Bot API Telegram (dipanggil grammY via fixedFetch) ----
-  const tgMatch = /api\.telegram\.org\/bot[^/]+\/([A-Za-z]+)$/.exec(url);
+  const tgMatch = /api\.telegram\.org\/bot([^/]+)\/([A-Za-z]+)$/.exec(url);
   if (tgMatch) {
-    const method = tgMatch[1];
+    const token = tgMatch[1];
+    const method = tgMatch[2];
     const body = await parseBody(init);
     const chatId =
       typeof body.chat_id === "number"
@@ -184,7 +186,7 @@ async function parseBody(init?: { body?: unknown }): Promise<Record<string, unkn
           : undefined;
     const text = typeof body.text === "string" ? body.text : undefined;
     if (method === "sendMessage") {
-      calls.push({ method, chatId, text, keyboard: body.reply_markup });
+      calls.push({ method, chatId, text, keyboard: body.reply_markup, token });
       return fakeResponse({
         ok: true,
         result: {
@@ -1712,6 +1714,7 @@ async function main(): Promise<void> {
   const { notifyChannelOrder } = await import("../lib/notify");
   process.env.TELEGRAM_CHANNEL_ID = "-100999";
   process.env.TELEGRAM_CHANNEL_URL = "https://t.me/unicodesdigital";
+  process.env.TELEGRAM_NEWS_BOT_TOKEN = "TEST-NEWS-TOKEN";
   // (a) Belum join -> /start menampilkan layar join (bukan menu).
   stubControl.channelMemberStatus = "left";
   err = await send(textUpdate(buyer, "/start"));
@@ -1782,6 +1785,11 @@ async function main(): Promise<void> {
       (channelCall?.text ?? "").includes("UD-T••••3456"),
     (channelCall?.text ?? "").slice(0, 300),
   );
+  check(
+    "channel: posting dikirim atas nama bot news (bukan bot toko)",
+    channelCall?.token === "TEST-NEWS-TOKEN",
+    `token=${channelCall?.token ?? "-"}`,
+  );
   // (e) Diposting ulang -> dedupe (tetap 1 postingan).
   await notifyChannelOrder(fakeOrder);
   check(
@@ -1791,6 +1799,7 @@ async function main(): Promise<void> {
   );
   delete process.env.TELEGRAM_CHANNEL_ID;
   delete process.env.TELEGRAM_CHANNEL_URL;
+  delete process.env.TELEGRAM_NEWS_BOT_TOKEN;
 
   // ================= S34: bayar via Midtrans Snap =================
   stubControl.midtransStatus = "pending";
@@ -1890,6 +1899,42 @@ async function main(): Promise<void> {
   );
   const whBad = await midtransWebhookPOST(whReq("0".repeat(128)));
   check("midtrans: webhook signature salah -> 401", whBad.status === 401, `status=${whBad.status}`);
+
+  // ================= S35: bot news (@unicodesdigitalbot) =================
+  const { createNewsBot } = await import("./news-bot");
+  const newsBot = createNewsBot("TEST-NEWS-TOKEN");
+  // botInfo wajib diisi manual karena handleUpdate butuh this.me
+  // (sama seperti bot utama di atas).
+  (newsBot as unknown as { botInfo: unknown }).botInfo = {
+    id: 9126919610,
+    is_bot: true,
+    first_name: "Unicodes Digital",
+    username: "unicodesdigitalbot",
+    can_join_groups: true,
+    can_read_all_group_messages: false,
+    supports_inline_queries: false,
+  };
+  err = await (async () => {
+    try {
+      await newsBot.handleUpdate(textUpdate(buyer, "/start") as never);
+      return null;
+    } catch (e) {
+      return e instanceof Error ? e.message : String(e);
+    }
+  })();
+  check(
+    "news bot: /start dibalas info + link toko + sensor",
+    err === null &&
+      lastText("sendMessage").includes("News & Info Transaksi") &&
+      lastText("sendMessage").includes("unicodesdigital_bot") &&
+      lastText("sendMessage").includes("disensor"),
+    lastText("sendMessage").slice(0, 150),
+  );
+  check(
+    "news bot: balasan dikirim atas nama token news bot",
+    (lastCall("sendMessage") as Call)?.token === "TEST-NEWS-TOKEN",
+    `token=${(lastCall("sendMessage") as Call)?.token ?? "-"}`,
+  );
 
   // ---- ringkasan ----
   const failed = results.filter((r) => !r.ok);

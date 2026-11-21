@@ -13,6 +13,7 @@ import {
   telegramAdminIds,
   telegramBotToken,
   telegramChannelId,
+  telegramNewsBotToken,
 } from "./config";
 import { rupiah, t } from "../bot/i18n";
 
@@ -34,7 +35,9 @@ export async function notifyChannelOrder(order: StoreOrder): Promise<boolean> {
   if (!channelId) return false;
   let token: string;
   try {
-    token = telegramBotToken();
+    // Berita transaksi diposting ATAS NAMA bot news (@unicodesdigitalbot)
+    // kalau token-nya dikonfigurasi; kalau belum, fallback ke bot toko.
+    token = telegramNewsBotToken() || telegramBotToken();
   } catch {
     return false;
   }

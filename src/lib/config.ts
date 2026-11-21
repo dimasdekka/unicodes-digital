@@ -20,6 +20,12 @@ export function telegramBotToken(): string {
   return required("TELEGRAM_BOT_TOKEN");
 }
 
+/** Token bot news (@unicodesdigitalbot). Opsional — kosong = posting
+ *  channel tetap memakai token bot toko. */
+export function telegramNewsBotToken(): string {
+  return (process.env.TELEGRAM_NEWS_BOT_TOKEN ?? "").trim();
+}
+
 /** ID Telegram admin (dipisah koma di env). */
 export function telegramAdminIds(): number[] {
   return (process.env.TELEGRAM_ADMIN_IDS ?? "")
