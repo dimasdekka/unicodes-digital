@@ -16,12 +16,13 @@ export interface CheckoutDraft {
 }
 
 export type AwaitingInput =
-  | { kind: "target"; draft: CheckoutDraft } // target produk on-demand
+  | { kind: "code"; productId: string } // kode invite Muse (ala Sondev: kode dulu, baru jumlah)
+  | { kind: "target"; draft: CheckoutDraft } // target produk on-demand (jalur lama)
   | { kind: "custom_qty"; productId: string } // ketik jumlah sendiri
   | { kind: "promo"; draft: CheckoutDraft } // ketik kode promo (ada draft)
   | { kind: "promo_check" } // ketik kode promo (tanpa draft — cek saja)
   | { kind: "custom_topup" } // ketik nominal isi saldo
-  | { kind: "support" }; // tulis pesan ke admin
+  | { kind: "ticket" }; // tulis pesan pertama / lanjutan untuk tiket support
 
 export interface Session {
   awaiting?: AwaitingInput;

@@ -370,6 +370,15 @@ async function parseBody(init?: { body?: unknown }): Promise<Record<string, unkn
     }));
     return fakeResponse({ from: 0, size: 100, total: list.length, transactions: list });
   }
+  if (url.includes("api.sondevs.tech/api/v1/stock")) {
+    if (stubControl.sondevFail) {
+      throw new Error("HARNESS: Sondev stock down");
+    }
+    return fakeResponse({
+      status: "success",
+      data: [{ code: "muse_token", sellable_quantity: 30, available_now: 30 }],
+    });
+  }
   if (url.includes("api.sondevs.tech/api/v1/orders/create")) {
     stubControl.sondevCreateCalls += 1;
     if (stubControl.sondevFail) {
@@ -453,7 +462,9 @@ async function main(): Promise<void> {
   const { getDb } = await import("../lib/db");
   const { getWallet, creditWallet, getReferralStats, hasRedeemedPromo, listPromoCodes } =
     await import("../lib/wallet");
-  const { getStoreOrder } = await import("../lib/orders");
+  const { getStoreOrder, createStoreOrder, fulfillOrder, markPaid } = await import(
+    "../lib/orders"
+  );
   const { validateInitData } = await import("../lib/telegram-webapp");
   const { getWebAppUrl, setWebAppMenuButton } = await import("./menu-button");
   const { serializeQrisPayload } = await import("../lib/payments/qris");
@@ -514,11 +525,12 @@ async function main(): Promise<void> {
   const cmdCall = calls.find((c) => c.method === "setMyCommands");
   const cmdList = (cmdCall?.data as { command: string }[] | undefined) ?? [];
   check(
-    "setMyCommands dipanggil saat startup (start/products/order/cancel, tanpa /menu)",
-    cmdList.length === 4 &&
+    "setMyCommands dipanggil saat startup (start/products/order/support/cancel, tanpa /menu)",
+    cmdList.length === 5 &&
       cmdList.some((c) => c.command === "start") &&
       cmdList.some((c) => c.command === "products") &&
       cmdList.some((c) => c.command === "order") &&
+      cmdList.some((c) => c.command === "support") &&
       cmdList.some((c) => c.command === "cancel") &&
       !cmdList.some((c) => c.command === "menu"),
     JSON.stringify(cmdList),
@@ -618,39 +630,55 @@ async function main(): Promise<void> {
     }
   }
 
+  // Alur checkout Muse ala Sondev: katalog -> detail -> kode invite ->
+  // jumlah -> ringkasan pembayaran (siap bayar). Dipakai semua tes checkout.
+  async function checkoutMuse(
+    user: typeof buyer,
+    qty: number,
+    code = "UVI0QD",
+  ): Promise<void> {
+    await send(cbUpdate(user, "cat:all"));
+    await send(cbUpdate(user, "prod:muse-token-1b"));
+    await send(cbUpdate(user, "entercode:muse-token-1b"));
+    await send(textUpdate(user, code));
+    await send(cbUpdate(user, `qty:muse-token-1b:${qty}`));
+  }
+
   // ================= S1: /start kaya =================
   let err = await send(textUpdate(buyer, "/start"));
   check("/start tidak throw", err === null, err ?? undefined);
   check(
-    "/start ala Lhie: sapaan waktu + nama + Profil Saya + Aktivitas Toko, tanpa referral, tanpa baris channel (channel belum diset)",
-    /Selamat (pagi|siang|sore|malam), Budi — selamat datang di UNICODES DIGITAL/.test(
-      lastText("sendMessage"),
-    ) &&
-      lastText("sendMessage").includes("Profil Saya") &&
-      lastText("sendMessage").includes("ID Telegram: 111") &&
-      lastText("sendMessage").includes("Username: @budi") &&
-      lastText("sendMessage").includes("Total Transaksi: Rp0") &&
-      lastText("sendMessage").includes("Saldo Saya: Rp0") &&
-      lastText("sendMessage").includes("Aktivitas Toko") &&
-      lastText("sendMessage").includes("Pengguna Telegram: 1") &&
-      lastText("sendMessage").includes("Pesanan berhasil: 0") &&
+    "/start format baru: header + sapaan waktu + INFORMASI AKUN + STATISTIK TOKO, tanpa referral, tanpa baris channel (channel belum diset)",
+    /✦ UNICODES DIGITAL/.test(lastText("sendMessage")) &&
+      /Selamat (pagi|siang|sore|malam), Budi!/.test(lastText("sendMessage")) &&
+      lastText("sendMessage").includes("Selamat datang di toko digital kami.") &&
+      lastText("sendMessage").includes("👤 INFORMASI AKUN") &&
+      lastText("sendMessage").includes("┌ ID Telegram : 111") &&
+      lastText("sendMessage").includes("├ Username    : @budi") &&
+      lastText("sendMessage").includes("├ Total Belanja : Rp0") &&
+      lastText("sendMessage").includes("└ Saldo Aktif : Rp0") &&
+      lastText("sendMessage").includes("📊 STATISTIK TOKO") &&
+      lastText("sendMessage").includes("├ 👥 Total Pengguna : 1") &&
+      lastText("sendMessage").includes("└ ✅ Pesanan Sukses : 0") &&
+      lastText("sendMessage").includes("Semua kebutuhan digitalmu") &&
+      lastText("sendMessage").includes("Silakan pilih menu di bawah untuk mulai") &&
       !lastText("sendMessage").includes("channel resmi") &&
       !lastText("sendMessage").includes("UD-111") &&
       !/referral/i.test(lastText("sendMessage")),
-    lastText("sendMessage").slice(0, 400),
+    lastText("sendMessage").slice(0, 500),
   );
   check(
-    "/start keyboard ala Lhie: Lihat Produk + Saldo + Pesanan + Bahasa + Kebijakan, tanpa Referral/Promo/Reseller/API/Support/Channel",
+    "/start keyboard ala Lhie: Lihat Produk + Saldo + Pesanan + Bahasa + Kebijakan + Support (tiket), tanpa Referral/Promo/Reseller/API/Channel",
     kbText(lastCall("sendMessage") as Call).includes("Lihat Produk") &&
       kbText(lastCall("sendMessage") as Call).includes("Saldo") &&
       kbText(lastCall("sendMessage") as Call).includes("Pesanan") &&
       kbText(lastCall("sendMessage") as Call).includes("Bahasa") &&
       kbText(lastCall("sendMessage") as Call).includes("Kebijakan") &&
+      kbText(lastCall("sendMessage") as Call).includes("Support") &&
       !kbText(lastCall("sendMessage") as Call).includes("Referral") &&
       !kbText(lastCall("sendMessage") as Call).includes("Promo") &&
       !kbText(lastCall("sendMessage") as Call).includes("Reseller") &&
       !kbText(lastCall("sendMessage") as Call).includes("API") &&
-      !kbText(lastCall("sendMessage") as Call).includes("Support") &&
       !kbText(lastCall("sendMessage") as Call).includes("Ikuti Channel"),
   );
 
@@ -664,7 +692,7 @@ async function main(): Promise<void> {
   check("tombol Katalog tidak throw", err === null, err ?? undefined);
   check(
     "katalog fokus Sondev: langsung produk Muse, tanpa AI Lain / Gemini",
-    kbText(lastCall("editMessageText")).includes("Muse AI Token 1B — Rp1.500") &&
+    kbText(lastCall("editMessageText")).includes("Muse AI Token 1B — Rp2.000") &&
       !kbText(lastCall("editMessageText")).includes("per 1B token") &&
       !kbText(lastCall("editMessageText")).includes("AI Lain") &&
       !kbText(lastCall("editMessageText")).includes("Gemini"),
@@ -681,13 +709,14 @@ async function main(): Promise<void> {
   err = await send(cbUpdate(buyer, "prod:muse-token-1b"));
   check("detail produk tidak throw", err === null, err ?? undefined);
   check(
-    "detail produk ala Lhie: banner foto + caption harga/stok/detail + paket jumlah",
+    "detail produk ala Lhie: banner foto + caption harga/stok/detail + tombol kode invite (paket jumlah pindah ke layar setelah kode)",
     (lastCall("sendPhoto") as Call)?.photo === "TEST-PRODUCT-BANNER" &&
       (lastCall("sendPhoto")?.text ?? "").includes("Muse AI Token 1B") &&
-      (lastCall("sendPhoto")?.text ?? "").includes("Rp1.500") &&
+      (lastCall("sendPhoto")?.text ?? "").includes("Rp2.000") &&
       (lastCall("sendPhoto")?.text ?? "").includes("/unit") &&
       (lastCall("sendPhoto")?.text ?? "").includes("Detail produk") &&
-      kbText(lastCall("sendPhoto") as Call).includes("5B") &&
+      kbText(lastCall("sendPhoto") as Call).includes("entercode:muse-token-1b") &&
+      !kbText(lastCall("sendPhoto") as Call).includes("qty:") &&
       calls.some((c) => c.method === "deleteMessage"),
     JSON.stringify({ photo: (lastCall("sendPhoto") as Call)?.photo }),
   );
@@ -699,7 +728,7 @@ async function main(): Promise<void> {
     "detail produk tanpa banner: fallback teks (edit di tempat)",
     err === null &&
       lastText("editMessageText").includes("Muse AI Token 1B") &&
-      lastText("editMessageText").includes("Rp1.500") &&
+      lastText("editMessageText").includes("Rp2.000") &&
       lastText("editMessageText").includes("/unit"),
     lastText("editMessageText").slice(0, 120),
   );
@@ -711,21 +740,125 @@ async function main(): Promise<void> {
     lastText("editMessageText").slice(0, 100),
   );
 
-  // ================= S4: checkout qty -> target -> promo skip -> pay =================
-  err = await send(cbUpdate(buyer, "qty:muse-token-1b:5"));
-  check("pilih qty tidak throw", err === null, err ?? undefined);
-  check("qty 5 meminta target", lastText("editMessageText").includes("Kode invite"));
-  err = await send(textUpdate(buyer, "https://muse.ai/invite/123"));
-  check("kirim target tidak throw", err === null, err ?? undefined);
-  check("setelah target: layar promo", lastText("sendMessage").includes("kode promo"));
-  err = await send(cbUpdate(buyer, "promo_skip"));
-  check("lewati promo tidak throw", err === null, err ?? undefined);
+  // ================= S4: checkout ala Sondev: kode -> qty -> ringkasan =================
+  // Detail produk tidak lagi menampilkan paket qty — yang ada tombol kode.
+  err = await send(cbUpdate(buyer, "cat:all"));
+  err = await send(cbUpdate(buyer, "prod:muse-token-1b"));
   check(
-    "layar bayar total 5x1500",
-    lastText("editMessageText").includes("Rp7.500") &&
-      kbText(lastCall("editMessageText") as Call).includes("pay_wallet"),
+    "detail Muse: tombol kode invite, bukan paket qty",
+    kbText(lastCall("sendPhoto") as Call).includes("entercode:muse-token-1b") &&
+      !kbText(lastCall("sendPhoto") as Call).includes("qty:"),
+    kbText(lastCall("sendPhoto") as Call).slice(0, 200),
+  );
+  err = await send(cbUpdate(buyer, "entercode:muse-token-1b"));
+  check("minta kode tidak throw", err === null, err ?? undefined);
+  check(
+    "prompt kode berisi langkah Sondev (Invite Friends + contoh kode di bawah)",
+    lastText("editMessageText").includes("Invite Friends") &&
+      lastText("editMessageText").includes("UVI0QD") &&
+      lastText("editMessageText").includes("30B") &&
+      lastText("editMessageText").includes("Contoh:") &&
+      lastText("editMessageText").trimEnd().endsWith("UVI0QD") &&
+      !lastText("editMessageText").includes("muse.ai/invite/"),
     lastText("editMessageText").slice(0, 200),
   );
+  // Teks tanpa kode ditolak — tetap menunggu kode.
+  err = await send(textUpdate(buyer, "halo dunia"));
+  check(
+    "teks tanpa kode ditolak",
+    err === null && lastText("sendMessage").includes("Format kode salah"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  // Kode huruf-semua ("TZVXJR") adalah kode valid — wajib diterima.
+  // (Sebelumnya ditolak karena validasi minta huruf+angka; salah.)
+  err = await send(textUpdate(buyer, "TZVXJR"));
+  check(
+    "kode huruf-semua diterima (bukan format salah)",
+    err === null && lastText("sendMessage").includes("TZVXJR"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  // Kode terlalu pendek ("hi") tetap ditolak.
+  await send(cbUpdate(buyer, "entercode:muse-token-1b"));
+  err = await send(textUpdate(buyer, "hi"));
+  check(
+    "kode terlalu pendek ditolak",
+    err === null && lastText("sendMessage").includes("Format kode salah"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  // Link invite lengkap diterima — kodenya diekstrak, layar qty tampil.
+  err = await send(textUpdate(buyer, "https://muse.ai/invite/UVI0QD"));
+  check("kirim link invite tidak throw", err === null, err ?? undefined);
+  check(
+    "layar qty: kode + harga dasar + stok live",
+    lastText("sendMessage").includes("UVI0QD") &&
+      lastText("sendMessage").includes("Rp2.000") &&
+      lastText("sendMessage").includes("Stok ready: 30B"),
+    lastText("sendMessage").slice(0, 200),
+  );
+  check(
+    "layar qty: paket 1/3/5/10/30B ala Sondev",
+    kbText(lastCall("sendMessage") as Call).includes("qty:muse-token-1b:3") &&
+      kbText(lastCall("sendMessage") as Call).includes("qty:muse-token-1b:30"),
+    kbText(lastCall("sendMessage") as Call).slice(0, 200),
+  );
+  err = await send(cbUpdate(buyer, "qty:muse-token-1b:5"));
+  check("pilih qty tidak throw", err === null, err ?? undefined);
+  check(
+    "ringkasan bayar ala Sondev: kode + total 5x2000 + saldo",
+    lastText("editMessageText").includes("RINGKASAN PEMBAYARAN") &&
+      lastText("editMessageText").includes("UVI0QD") &&
+      lastText("editMessageText").includes("Rp10.000") &&
+      kbText(lastCall("editMessageText") as Call).includes("pay_wallet"),
+    lastText("editMessageText").slice(0, 250),
+  );
+
+  // ================= S4b: satu kode maks 30x (ala Sondev "code is used up") =================
+  // Seed 30 order berbayar (delivered) pakai kode CAP30X atas nama buyer lain
+  // (tg:999) supaya statistik buyer 111 tidak berubah; dihapus lagi setelah tes.
+  const seedCodeUses = async (code: string, n: number): Promise<void> => {
+    for (let i = 0; i < n; i++) {
+      const seeded = await createStoreOrder({
+        catalogProductId: "muse-token-1b",
+        quantity: 1,
+        buyerRef: "tg:999",
+        target: code,
+      });
+      getDb()
+        .prepare("UPDATE store_orders SET status = 'delivered' WHERE id = ?")
+        .run(seeded.id);
+    }
+  };
+  await seedCodeUses("CAP30X", 30);
+  await send(cbUpdate(buyer, "entercode:muse-token-1b"));
+  err = await send(textUpdate(buyer, "CAP30X"));
+  check(
+    "kode 30x ditolak (used up) + diminta kode lain",
+    err === null && lastText("sendMessage").includes("sudah dipakai 30x"),
+    lastText("sendMessage").slice(0, 150),
+  );
+  // Kode lain tetap bisa setelah penolakan (masih menunggu kode).
+  err = await send(textUpdate(buyer, "UVI0QD"));
+  check(
+    "kode lain diterima setelah penolakan",
+    err === null &&
+      lastText("sendMessage").includes("UVI0QD") &&
+      lastText("sendMessage").includes("Stok ready"),
+    lastText("sendMessage").slice(0, 150),
+  );
+  getDb().prepare("DELETE FROM store_orders WHERE buyer_ref = 'tg:999'").run();
+  // Re-check saat bayar: kode masuk saat 29x, mencapai 30x sebelum bayar.
+  await seedCodeUses("PAY29X", 29);
+  await send(cbUpdate(buyer, "entercode:muse-token-1b"));
+  await send(textUpdate(buyer, "PAY29X"));
+  await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
+  await seedCodeUses("PAY29X", 1);
+  err = await send(cbUpdate(buyer, "pay_wallet"));
+  check(
+    "bayar ditolak kalau kode mencapai 30x sebelum bayar",
+    err === null && lastText("editMessageText").includes("sudah dipakai 30x"),
+    lastText("editMessageText").slice(0, 150),
+  );
+  getDb().prepare("DELETE FROM store_orders WHERE buyer_ref = 'tg:999'").run();
 
   // ================= S5: dompet + top-up =================
   err = await send(cbUpdate(buyer, "wallet"));
@@ -771,11 +904,7 @@ async function main(): Promise<void> {
   );
 
   // ================= S7: bayar saldo -> delivered + notifikasi =================
-  await send(cbUpdate(buyer, "cat"));
-  await send(cbUpdate(buyer, "prod:muse-token-1b"));
-  await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
-  await send(textUpdate(buyer, "https://muse.ai/invite/123"));
-  await send(cbUpdate(buyer, "promo_skip"));
+  await checkoutMuse(buyer, 1);
   const callsBeforePay = calls.length;
   err = await send(cbUpdate(buyer, "pay_wallet"));
   check("bayar saldo tidak throw", err === null, err ?? undefined);
@@ -785,7 +914,7 @@ async function main(): Promise<void> {
     payCalls.some((c) => (c.text ?? "").includes("Dibayar dari saldo")),
     JSON.stringify(payCalls.map((c) => c.text?.slice(0, 60))),
   );
-  check("saldo terpotong 1500", getWallet(111).balanceIdr === 23500);
+  check("saldo terpotong 2000", getWallet(111).balanceIdr === 23000);
   const orderRow = getDb()
     .prepare("SELECT id, status FROM store_orders WHERE buyer_ref = 'tg:111' ORDER BY created_at DESC LIMIT 1")
     .get() as { id: string; status: string } | undefined;
@@ -801,27 +930,49 @@ async function main(): Promise<void> {
   check(
     "welcome menampilkan statistik setelah ada order",
     err === null &&
-      lastText().includes("Total Transaksi: Rp1.500"),
+      lastText().includes("Total Belanja : Rp2.000"),
     lastText().slice(0, 250),
+  );
+
+  // ================= S7b: klaim atomik — bayar + fulfill ganda tidak dobel =================
+  // Dua markPaid bersamaan pada satu order: keduanya resolve, status tetap paid.
+  const raceOrder = await createStoreOrder({
+    catalogProductId: "muse-token-1b",
+    quantity: 1,
+    buyerRef: "tg:111",
+    target: "https://muse.ai/invite/123",
+  });
+  const [raceA, raceB] = await Promise.all([
+    markPaid(raceOrder.id),
+    markPaid(raceOrder.id),
+  ]);
+  check(
+    "markPaid ganda bersamaan: keduanya paid, tanpa throw",
+    raceA.status === "paid" &&
+      raceB.status === "paid" &&
+      (await getStoreOrder(raceOrder.id))?.status === "paid",
+    `${raceA.status}/${raceB.status}`,
+  );
+  // Fulfill pada order yang sudah processing: kembali tanpa belanja ke supplier lagi.
+  getDb()
+    .prepare("UPDATE store_orders SET status = 'processing' WHERE id = ?")
+    .run(raceOrder.id);
+  const again = await fulfillOrder(raceOrder.id);
+  check(
+    "fulfill ganda tidak jalan (sudah processing)",
+    again.status === "processing",
+    again.status,
   );
 
   // ================= S8: reward referral =================
   creditWallet({ tgId: 333, amountIdr: 50000, kind: "topup", ref: "TEST", note: "test" });
-  await send(cbUpdate(friend, "cat"));
-  await send(cbUpdate(friend, "prod:muse-token-1b"));
-  await send(cbUpdate(friend, "qty:muse-token-1b:1"));
-  await send(textUpdate(friend, "https://muse.ai/invite/999"));
-  await send(cbUpdate(friend, "promo_skip"));
+  await checkoutMuse(friend, 1, "UVI0QD");
   err = await send(cbUpdate(friend, "pay_wallet"));
   check("order pertama teman tidak throw", err === null, err ?? undefined);
   check("referrer 222 dapat Rp1.500", getWallet(222).balanceIdr === 1500);
   check("referral tercatat rewarded", getReferralStats(222).rewarded === 1);
   // Order kedua teman -> reward TIDAK dobel.
-  await send(cbUpdate(friend, "cat"));
-  await send(cbUpdate(friend, "prod:muse-token-1b"));
-  await send(cbUpdate(friend, "qty:muse-token-1b:1"));
-  await send(textUpdate(friend, "https://muse.ai/invite/999"));
-  await send(cbUpdate(friend, "promo_skip"));
+  await checkoutMuse(friend, 1, "UVI0QD");
   await send(cbUpdate(friend, "pay_wallet"));
   check("reward tidak dobel di order kedua", getWallet(222).balanceIdr === 1500);
 
@@ -833,30 +984,24 @@ async function main(): Promise<void> {
   check("promo_list menampilkan TEST10", lastText("sendMessage").includes("TEST10"));
   err = await send(textUpdate(buyer, "/promo_add NAKAL percent 10"));
   check("promo_add non-admin ditolak", lastText("sendMessage").includes("khusus admin"));
-  // Checkout qty 10 + promo TEST10 (10% dari 15000 = 1500).
-  await send(cbUpdate(buyer, "cat"));
-  await send(cbUpdate(buyer, "prod:muse-token-1b"));
-  await send(cbUpdate(buyer, "qty:muse-token-1b:10"));
-  await send(textUpdate(buyer, "https://muse.ai/invite/123"));
+  // Checkout qty 10 + promo TEST10 (10% dari 20000 = 2000).
+  await checkoutMuse(buyer, 10);
   await send(cbUpdate(buyer, "promo_enter"));
   err = await send(textUpdate(buyer, "TEST10"));
   check("pakai promo tidak throw", err === null, err ?? undefined);
   check(
-    "promo dipakai: diskon 1500, total 13500",
-    lastText("sendMessage").includes("Rp1.500") &&
-      lastText("sendMessage").includes("Rp13.500"),
+    "promo dipakai: diskon 2000, total 18000",
+    lastText("sendMessage").includes("Rp2.000") &&
+      lastText("sendMessage").includes("Rp18.000"),
     lastText("sendMessage").slice(0, 300),
   );
   err = await send(cbUpdate(buyer, "pay_wallet"));
   check("bayar dengan promo tidak throw", err === null, err ?? undefined);
-  check("saldo 23500-13500=10000", getWallet(111).balanceIdr === 10000);
+  check("saldo 23000-18000=5000", getWallet(111).balanceIdr === 5000);
   check("redemption promo tercatat", hasRedeemedPromo("TEST10", 111));
   check("uses_count promo = 1", (listPromoCodes().find((p) => p.code === "TEST10")?.usesCount ?? -1) === 1);
   // Pakai lagi oleh user yang sama -> ditolak.
-  await send(cbUpdate(buyer, "cat"));
-  await send(cbUpdate(buyer, "prod:muse-token-1b"));
-  await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
-  await send(textUpdate(buyer, "https://muse.ai/invite/123"));
+  await checkoutMuse(buyer, 1);
   await send(cbUpdate(buyer, "promo_enter"));
   err = await send(textUpdate(buyer, "TEST10"));
   check(
@@ -865,45 +1010,99 @@ async function main(): Promise<void> {
     lastText("sendMessage").slice(0, 120),
   );
 
-  // ================= S10: support DIMATIKAN (Dim 2026-11-21) =================
-  // Tombol Support sudah dihapus dari menu; callback lama + pesan support
-  // TIDAK boleh lagi diteruskan ke admin (nomor Dim) — jawab "tidak tersedia".
+  // ================= S10: tiket support (ganti forward langsung, 2026-11-21) =================
+  // Forward pesan ke Telegram admin DIMATIKAN permanen — nomor Dim tidak
+  // boleh tampil ke user. Gantinya: tiket. User buat tiket dari bot,
+  // admin menjawab dari web admin (replyToTicket -> Bot API).
   const forwardsBefore = calls.filter((c) => c.method === "forwardMessage").length;
   err = await send(cbUpdate(buyer, "support"));
-  check("support dimatikan: tidak throw", err === null, err ?? undefined);
+  check("support tidak throw", err === null, err ?? undefined);
   check(
-    "support dimatikan: balas tidak tersedia, tanpa info admin",
-    lastText("editMessageText").includes("tidak tersedia") &&
+    "layar support: tanpa info admin pribadi, ada tombol buat tiket + tiket saya",
+    lastText("editMessageText").includes("Support") &&
+      kbText(lastCall("editMessageText")).includes("support_msg") &&
+      kbText(lastCall("editMessageText")).includes("my_tickets") &&
       !lastText("editMessageText").includes("@Dimas0227"),
-    lastText("editMessageText").slice(0, 150),
+    lastText("editMessageText").slice(0, 200),
   );
   err = await send(cbUpdate(buyer, "support_msg"));
   check(
-    "support_msg dimatikan: tidak membuka input pesan",
-    err === null && lastText("editMessageText").includes("tidak tersedia"),
+    "support_msg membuka input pesan tiket",
+    err === null && lastText("editMessageText").includes("Jelaskan kendala"),
     lastText("editMessageText").slice(0, 150),
   );
   err = await send(textUpdate(buyer, "Order saya belum masuk, tolong dicek"));
-  check("pesan support tidak throw", err === null, err ?? undefined);
+  check("pesan tiket tidak throw", err === null, err ?? undefined);
   check(
-    "pesan support TIDAK diteruskan ke admin",
+    "tiket dibuat: konfirmasi berisi nomor tiket",
+    lastText("sendMessage").includes("Tiket") &&
+      /TKT-[A-Z0-9]{6}/.test(lastText("sendMessage")),
+    lastText("sendMessage").slice(0, 150),
+  );
+  check(
+    "pesan tiket TIDAK diteruskan ke admin (tanpa forwardMessage)",
     calls.filter((c) => c.method === "forwardMessage").length === forwardsBefore,
   );
-  const adminReply = textUpdate(admin, "Sudah dicek, token sudah masuk ya", {
-    reply_to_message: {
-      message_id: 555,
-      from: { id: 1, first_name: "TestBot", is_bot: true },
-      forward_from: { id: 111, first_name: "Budi", is_bot: false },
-      text: "Order saya belum masuk, tolong dicek",
-    },
-  });
-  err = await send(adminReply);
-  check("balasan admin tidak throw", err === null, err ?? undefined);
+  const { getOpenTicketByUser, getTicketMessages, replyToTicket, closeTicket } =
+    await import("../lib/support-tickets");
+  const ticket = getOpenTicketByUser(111);
+  check("tiket tersimpan di DB (open)", ticket !== null && ticket?.status === "open");
   check(
-    "balasan admin ke thread lama tetap diteruskan ke pembeli",
+    "pesan pertama tersimpan di thread",
+    getTicketMessages(ticket?.id ?? "").some((m) => m.sender === "user" && m.text.includes("belum masuk")),
+  );
+  // Pesan kedua masuk ke tiket yang sama (bukan tiket baru).
+  err = await send(cbUpdate(buyer, "support_msg"));
+  err = await send(textUpdate(buyer, "Sudah 1 jam belum masuk juga"));
+  check(
+    "pesan kedua ditambahkan ke tiket yang sama",
+    lastText("sendMessage").includes("ditambahkan ke tiket") &&
+      getOpenTicketByUser(111)?.id === ticket?.id,
+    lastText("sendMessage").slice(0, 150),
+  );
+  // Balasan admin via web (replyToTicket): terkirim ke user via Bot API stub.
+  const replyRes = await replyToTicket(ticket?.id ?? "", "Sudah dicek, token sudah masuk ya");
+  check("balasan admin via replyToTicket ok", replyRes.ok, replyRes.error ?? "");
+  check(
+    "balasan admin terkirim ke user di Telegram",
     calls.some(
-      (c) => c.method === "sendMessage" && c.chatId === 111 && (c.text ?? "").includes("Balasan admin"),
+      (c) =>
+        c.method === "sendMessage" &&
+        c.chatId === 111 &&
+        (c.text ?? "").includes("Sudah dicek, token sudah masuk ya"),
     ),
+  );
+  check(
+    "balasan admin tersimpan + status tiket jadi pending",
+    getOpenTicketByUser(111)?.status === "pending" &&
+      getTicketMessages(ticket?.id ?? "").some((m) => m.sender === "admin"),
+  );
+  // Tiket saya: daftar tiket user.
+  err = await send(cbUpdate(buyer, "my_tickets"));
+  check(
+    "tiket saya menampilkan tiket user",
+    err === null && lastText("editMessageText").includes(ticket?.id ?? "TKT-"),
+    lastText("editMessageText").slice(0, 200),
+  );
+  // Kebijakan: tanpa referensi support ke akun pribadi.
+  err = await send(cbUpdate(buyer, "policy"));
+  check(
+    "kebijakan tanpa @Dimas0227, arahkan ke tiket",
+    err === null &&
+      !lastText("editMessageText").includes("@Dimas0227") &&
+      lastText("editMessageText").includes("tiket support"),
+    lastText("editMessageText").slice(0, 300),
+  );
+  // Tutup tiket -> pesan baru membuka tiket BARU.
+  const closeRes = await closeTicket(ticket?.id ?? "");
+  check("tutup tiket ok", closeRes.ok, closeRes.error ?? "");
+  err = await send(cbUpdate(buyer, "support_msg"));
+  err = await send(textUpdate(buyer, "Masih ada masalah lain"));
+  const ticket2 = getOpenTicketByUser(111);
+  check(
+    "tiket ditutup: pesan baru buka tiket baru",
+    ticket2 !== null && ticket2.id !== ticket?.id,
+    ticket2?.id ?? "",
   );
 
   // ================= S11: pesanan saya + detail =================
@@ -964,7 +1163,7 @@ async function main(): Promise<void> {
     kbText(lastCall("sendMessage")).includes(myOrderId),
     kbText(lastCall("sendMessage")).slice(0, 200),
   );
-  const { createStoreOrder } = await import("../lib/orders");
+  // (createStoreOrder sudah diimpor di atas main — pakai ulang di sini.)
   const legacyOrder = await createStoreOrder({
     catalogProductId: "muse-token-1b",
     quantity: 1,
@@ -1163,14 +1362,14 @@ async function main(): Promise<void> {
     err = await send(cbUpdate(buyer, "prod:muse-token-1b"));
     check(
       "detail out_of_stock ada pesan Stok Habis tanpa tombol beli",
-      lastText("editMessageText").includes("Stok habis") &&
+      lastText("editMessageText").includes("Stok Habis") &&
         !kbText(lastCall("editMessageText")).includes("qty:"),
       lastText("editMessageText").slice(0, 150),
     );
     err = await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
     check(
       "checkout out_of_stock ditolak (pesan stok, tanpa order baru)",
-      lastText("editMessageText").includes("Stok habis") &&
+      lastText("editMessageText").includes("Stok Habis") &&
         (
           getDb().prepare("SELECT COUNT(*) AS n FROM store_orders").get() as {
             n: number;
@@ -1182,10 +1381,24 @@ async function main(): Promise<void> {
     if (muse) muse.stockState = "available";
   }
 
-  // ================= S20: qty custom, target kosong, saldo kurang, Snap =================
-  // Qty custom: 0 / 31 / "abc" / -5 ditolak; 7 diterima.
+  // ================= S20: kode invite, qty custom, saldo kurang, Snap =================
+  // Kode dulu (ala Sondev), baru qty custom: 0 / 31 / "abc" / -5 ditolak; 7 diterima.
   await send(cbUpdate(buyer, "cat:all"));
   await send(cbUpdate(buyer, "prod:muse-token-1b"));
+  await send(cbUpdate(buyer, "entercode:muse-token-1b"));
+  // Kode kosong (cuma spasi) ditolak — tetap menunggu kode.
+  err = await send(textUpdate(buyer, "   "));
+  check(
+    "kode kosong ditolak (minta ulang)",
+    err === null && lastText("sendMessage").includes("tidak ketemu"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  err = await send(textUpdate(buyer, "UVI0QD"));
+  check(
+    "kode polos diterima (layar qty)",
+    err === null && lastText("sendMessage").includes("UVI0QD"),
+    lastText("sendMessage").slice(0, 120),
+  );
   await send(cbUpdate(buyer, "qtycustom:muse-token-1b"));
   for (const bad of ["0", "31", "abc", "-5"]) {
     err = await send(textUpdate(buyer, bad));
@@ -1197,20 +1410,13 @@ async function main(): Promise<void> {
   }
   err = await send(textUpdate(buyer, "7"));
   check(
-    "qty custom 7 diterima (minta target)",
-    err === null && lastText("sendMessage").includes("Kode invite"),
-    lastText("sendMessage").slice(0, 120),
+    "qty custom 7 diterima (langsung ringkasan, tanpa tanya target lagi)",
+    err === null &&
+      lastText("sendMessage").includes("RINGKASAN PEMBAYARAN") &&
+      lastText("sendMessage").includes("UVI0QD"),
+    lastText("sendMessage").slice(0, 150),
   );
-  // Target kosong (cuma spasi) ditolak — minta ulang, tidak lanjut ke promo.
-  err = await send(textUpdate(buyer, "   "));
-  check(
-    "target kosong ditolak (minta ulang)",
-    err === null && lastText("sendMessage").includes("Kode invite"),
-    lastText("sendMessage").slice(0, 120),
-  );
-  err = await send(textUpdate(buyer, "https://muse.ai/invite/123"));
-  await send(cbUpdate(buyer, "promo_skip"));
-  // Paksa saldo rendah supaya bayar saldo pasti kurang (total 7 x 1500).
+  // Paksa saldo rendah supaya bayar saldo pasti kurang (total 7 x 2000).
   getDb()
     .prepare("UPDATE wallets SET balance_idr = ? WHERE tg_id = ?")
     .run(1000, buyer.id);
@@ -1226,10 +1432,10 @@ async function main(): Promise<void> {
   err = await send(cbUpdate(buyer, "pay_midtrans"));
   const mtPayText = lastText("editMessageText");
   check(
-    "bayar Midtrans mengirim link bayar + total Rp10.500",
+    "bayar Midtrans mengirim link bayar + total Rp14.000",
     err === null &&
       mtPayText.includes("Pembayaran Midtrans") &&
-      mtPayText.includes("Rp10.500"),
+      mtPayText.includes("Rp14.000"),
     mtPayText.slice(0, 200),
   );
   const awaitingOrder = getDb()
@@ -1241,8 +1447,8 @@ async function main(): Promise<void> {
     ? getMidtransPayment(awaitingOrder.id)
     : undefined;
   check(
-    "pembayaran Midtrans order tersimpan (Rp10.500, pending)",
-    mtOrderRow?.amount_idr === 10500 && mtOrderRow?.status === "pending",
+    "pembayaran Midtrans order tersimpan (Rp14.000, pending)",
+    mtOrderRow?.amount_idr === 14000 && mtOrderRow?.status === "pending",
     `amount=${mtOrderRow?.amount_idr} status=${mtOrderRow?.status}`,
   );
 
@@ -1289,10 +1495,7 @@ async function main(): Promise<void> {
   });
   redeemPromo({ code: "HABIS1", tgId: 333, orderId: "UD-HABIS-1", discountIdr: 1000 });
   async function checkoutToPromo(): Promise<void> {
-    await send(cbUpdate(buyer, "cat:all"));
-    await send(cbUpdate(buyer, "prod:muse-token-1b"));
-    await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
-    await send(textUpdate(buyer, "https://muse.ai/invite/123"));
+    await checkoutMuse(buyer, 1);
     await send(cbUpdate(buyer, "promo_enter"));
   }
   await checkoutToPromo();
@@ -1368,9 +1571,9 @@ async function main(): Promise<void> {
   check(
     "menu EN: welcome + tombol Inggris (tanpa referral)",
     err === null &&
-      /Good (morning|afternoon|evening), Budi — welcome to UNICODES DIGITAL/.test(
-        lastText("sendMessage"),
-      ) &&
+      /Good (morning|afternoon|evening), Budi!/.test(lastText("sendMessage")) &&
+      lastText("sendMessage").includes("ACCOUNT INFO") &&
+      lastText("sendMessage").includes("STORE STATS") &&
       !lastText("sendMessage").includes("Referral code") &&
       kbText(lastCall("sendMessage")).includes("View Products") &&
       kbText(lastCall("sendMessage")).includes("Balance"),
@@ -1445,7 +1648,7 @@ async function main(): Promise<void> {
   });
   const { payment: dupQris } = createQrisPayment({
     reference: dupOrder.id,
-    amountIdr: 1500,
+    amountIdr: 2000,
     staticPayload: TEST_STATIC_QRIS,
   });
   stubControl.feedTransactions = [
@@ -1476,9 +1679,8 @@ async function main(): Promise<void> {
   );
 
   // ================= S27: fulfillment gagal -> refund =================
-  const { fulfillOrder, markPaid, setOrderPaidVia } = await import(
-    "../lib/orders"
-  );
+  // (fulfillOrder, markPaid sudah diimpor di atas main — pakai ulang di sini.)
+  const { setOrderPaidVia } = await import("../lib/orders");
   const { debitWallet: debitWalletLib } = await import("../lib/wallet");
   // (a) Bayar saldo -> refund kembali ke dompet.
   creditWallet({ tgId: 111, amountIdr: 50000, kind: "topup", ref: "TEST-S27", note: "test" });
@@ -1490,7 +1692,7 @@ async function main(): Promise<void> {
     buyerRef: "tg:111",
     target: "https://muse.ai/invite/123",
   });
-  const debited = debitWalletLib({ tgId: 111, amountIdr: 1500, kind: "purchase", ref: failWallet.id, note: "test" });
+  const debited = debitWalletLib({ tgId: 111, amountIdr: 2000, kind: "purchase", ref: failWallet.id, note: "test" });
   check("setup S27a: debit saldo berhasil", debited !== null);
   await setOrderPaidVia(failWallet.id, "wallet");
   await markPaid(failWallet.id);
@@ -1590,11 +1792,19 @@ async function main(): Promise<void> {
     ores.status === 201,
     `status ${ores.status}`,
   );
+  // Jumlah custom >30 ditolak API (batas penebusan Muse per kode).
+  ores = await orderPost(orderReq({ ...orderBody, quantity: 99 }));
+  const oresBody3 = (await ores.json()) as { ok: boolean; error?: string };
+  check(
+    "jumlah custom >30 ditolak API (400)",
+    ores.status === 400 && (oresBody3.error ?? "").includes("30"),
+    `status ${ores.status}: ${oresBody3.error ?? ""}`,
+  );
 
   // ================= S29: sesi /cancel, callback asing, tombol back =================
   await send(cbUpdate(buyer, "cat:all"));
   await send(cbUpdate(buyer, "prod:muse-token-1b"));
-  await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
+  await send(cbUpdate(buyer, "entercode:muse-token-1b"));
   err = await send(textUpdate(buyer, "/cancel"));
   check(
     "/cancel tidak throw + menampilkan dibatalkan",
@@ -1629,7 +1839,7 @@ async function main(): Promise<void> {
   });
   const { payment: pollQris } = createQrisPayment({
     reference: pollOrder.id,
-    amountIdr: 1500,
+    amountIdr: 2000,
     staticPayload: TEST_STATIC_QRIS,
   });
   stubControl.feedTransactions = [
@@ -1657,7 +1867,7 @@ async function main(): Promise<void> {
   // (Ada pembayaran pending, jadi tick benar-benar butuh feed.)
   createQrisPayment({
     reference: "UD-NOSESSION-1",
-    amountIdr: 1500,
+    amountIdr: 2000,
     staticPayload: TEST_STATIC_QRIS,
   });
   gopayClient.clearSession();
@@ -1686,7 +1896,7 @@ async function main(): Promise<void> {
   });
   createQrisPayment({
     reference: expOrder.id,
-    amountIdr: 1500,
+    amountIdr: 2000,
     staticPayload: TEST_STATIC_QRIS,
   });
   // Buat QR kedaluwarsa (tanpa menunggu 5 menit): mundurkan expires_at-nya.
@@ -1942,9 +2152,9 @@ async function main(): Promise<void> {
   // (a) Checkout -> pay_midtrans -> link bayar Midtrans dikirim.
   await send(textUpdate(buyer, "/start"));
   err = await send(cbUpdate(buyer, "prod:muse-token-1b"));
-  err = await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
+  err = await send(cbUpdate(buyer, "entercode:muse-token-1b"));
   err = await send(textUpdate(buyer, "https://muse.ai/invite/789"));
-  err = await send(cbUpdate(buyer, "promo_skip"));
+  err = await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
   check(
     "midtrans: layar bayar ada tombol Midtrans",
     kbText(lastCall("editMessageText") as Call).includes("pay_midtrans"),

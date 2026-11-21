@@ -20,6 +20,7 @@
 // masih 3 produk seed. Begitu key benar tersedia, produk asli tinggal
 // ditambahkan di bawah dengan category + stockState masing-masing.
 import { retailPrice } from "./pricing";
+import { getEffectiveRetailPrice } from "./product-prices";
 import type { SupplierId } from "./suppliers/types";
 
 export type Fulfillment =
@@ -47,7 +48,7 @@ export interface CatalogProduct {
   /** Produk on-demand (mis. Muse) WAJIB target: kode invite / email target pembeli.
    *  Tanpa target, Sondev menolak order dengan 400 INVALID_ORDER (docs v1.2). */
   requiresTarget?: boolean;
-  /** Label input target di checkout (mis. "Kode invite Muse"). */
+  /** Label input target di checkout (mis. "Link invite Muse"). */
   targetLabel?: string;
   /** DEPRECATED — turunan dari stockState ("coming_soon"). Dipakai sebagian
    *  kode lama; logika baru harus membaca stockState. Selalu jaga selaras:
@@ -72,11 +73,10 @@ export const CATALOG: CatalogProduct[] = [
     supplier: "sondev",
     supplierProductCode: "muse_token",
     fulfillment: "standard",
-    // CONTOH — harga final dari katalog live Sondev setelah deploy.
-    // Target: jual sedekat mungkin dengan Rp1.000/1B (harga bot Sondev sendiri)
-    // kalau grosirnya mengizinkan. Angka Rp8.500/Rp12.000 di docs ternyata
-    // hanya contoh di dokumentasi, BUKAN harga live.
-    retailPriceIdr: 1500,
+    // Harga retail diputuskan Dim 2026-11-21: Rp2.000/1B (grosir Rp800 ->
+    // margin Rp1.200). Sondev sendiri jual Rp1.000/1B di botnya — harga
+    // ini di atas itu atas keputusan Dim, bukan harga contoh.
+    retailPriceIdr: 2000,
     active: true,
     category: "Muse",
     stockState: "available",
@@ -84,13 +84,13 @@ export const CATALOG: CatalogProduct[] = [
     unit: "per 1B token",
     features: [
       "Masuk ke akun kamu dalam hitungan menit",
-      "Cukup kirim kode invite / link referral",
+      "Token masuk ke akun Muse kamu (via kode invite)",
       "Harga per 1B — beli sesuai kebutuhan",
     ],
     accent: "#7c3aed",
-    // Produk on-demand: pembeli WAJIB isi target (kode invite / link referral).
+    // Produk on-demand: pembeli WAJIB isi target (link invite Muse).
     requiresTarget: true,
-    targetLabel: "Kode invite / link referral Muse (cth: https://muse.ai/invite/3015497298687799)",
+    targetLabel: "Link invite Muse",
   },
 
   // --- LahaStore = AI lain (Gemini) ---
@@ -137,14 +137,21 @@ export const CATALOG: CatalogProduct[] = [
   },
 ];
 
+/** Harga efektif: override dari web admin kalau ada (lihat product-prices.ts),
+ *  kalau tidak harga dasar di CATALOG. Selalu kembalikan salinan — jangan
+ *  mutasi objek statis CATALOG. */
+function withEffectivePrice(p: CatalogProduct): CatalogProduct {
+  return { ...p, retailPriceIdr: getEffectiveRetailPrice(p) };
+}
+
 export function getCatalogProduct(id: string): CatalogProduct {
   const product = CATALOG.find((p) => p.id === id);
   if (!product) throw new Error(`Produk tidak ditemukan: ${id}`);
-  return product;
+  return withEffectivePrice(product);
 }
 
 export function listActiveProducts(): CatalogProduct[] {
-  return CATALOG.filter((p) => p.active);
+  return CATALOG.filter((p) => p.active).map(withEffectivePrice);
 }
 
 /** Daftar kategori (urutan kemunculan pertama di katalog) dari produk aktif. */
@@ -159,5 +166,7 @@ export function listCategories(): string[] {
 /** Produk aktif per kategori; "Semua" = semua produk aktif. */
 export function listActiveProductsByCategory(category: string): CatalogProduct[] {
   if (category === "Semua") return listActiveProducts();
-  return CATALOG.filter((p) => p.active && p.category === category);
+  return CATALOG.filter((p) => p.active && p.category === category).map(
+    withEffectivePrice,
+  );
 }

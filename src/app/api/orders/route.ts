@@ -39,6 +39,13 @@ export async function POST(req: Request) {
       typeof body.quantity === "number" && body.quantity > 0
         ? Math.floor(body.quantity)
         : 1;
+    // Jumlah custom tidak boleh lebih dari 30 (batas penebusan Muse per kode).
+    if (quantity > 30) {
+      return NextResponse.json(
+        { ok: false, error: "Jumlah maksimal 30 per order." },
+        { status: 400 },
+      );
+    }
     // Telegram Web App: validasi initData -> buyerRef dari user terverifikasi.
     let buyerRef =
       typeof body.buyerRef === "string" ? body.buyerRef : "web";

@@ -24,6 +24,10 @@ function openDb(): DatabaseSync {
   const db = new DatabaseSync(dbPath());
   // WAL: pembaca tidak memblokir penulis (web + bot jalan bersamaan).
   db.exec("PRAGMA journal_mode = WAL");
+  // busy_timeout: penulis yang antre (bot + web + poller, ribuan user
+  // bersamaan) MENUNGGU sampai 5 detik, bukan langsung SQLITE_BUSY.
+  // Tanpa ini, dua tulis bersamaan dari proses berbeda langsung throw.
+  db.exec("PRAGMA busy_timeout = 5000");
   db.exec(`
     CREATE TABLE IF NOT EXISTS store_orders (
       id TEXT PRIMARY KEY,

@@ -9,6 +9,7 @@
 //
 // Jalankan: npm run bot (long polling; TELEGRAM_BOT_TOKEN di .env.local)
 // Token: @BotFather -> /newbot. Admin IDs: /getid atau @userinfobot.
+import { sequentialize } from "@grammyjs/runner";
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import {
   getCatalogProduct,
@@ -16,6 +17,7 @@ import {
   listActiveProductsByCategory,
 } from "../lib/catalog";
 import {
+  countCodeUses,
   createStoreOrder,
   fulfillOrder,
   getBuyerStats,
@@ -27,6 +29,12 @@ import {
   setOrderPaidVia,
   type StoreOrder,
 } from "../lib/orders";
+import {
+  addUserMessage,
+  createTicket,
+  getOpenTicketByUser,
+  listTicketsByUser,
+} from "../lib/support-tickets";
 import { createQrisPayment, getQrisPaymentByReference } from "../lib/payments/qris";
 import { tickQrisPayments } from "../lib/payments/qris-poller";
 import { renderQrisCardOrPlain } from "../lib/payments/qris-card";
@@ -59,6 +67,7 @@ import {
 import { rupiah, t, type Strings } from "./i18n";
 import { fixedFetch } from "./fixed-fetch";
 import { cancelAwaiting, getSession, type CheckoutDraft } from "./session";
+import { getSupplier } from "../lib/suppliers";
 import { getWebAppUrl } from "./menu-button";
 import { telegramAdminIds, telegramBotToken, telegramChannelId, telegramChannelUrl, midtransConfigured, productBannerFileId } from "../lib/config";
 import {
@@ -68,15 +77,12 @@ import {
 } from "../lib/payments/midtrans";
 import { tickMidtransPayments } from "../lib/payments/midtrans-poller";
 
-const ADMIN_USERNAME = "@Dimas0227";
-const QTY_PACKS = [1, 5, 10, 30];
+const QTY_PACKS = [1, 3, 5, 10, 30];
 
-/** Support DIMATIKAN dulu (Dim 2026-11-21): tombol sudah dihapus dari menu,
- *  tapi tombol di pesan lama + pesan yang sudah masuk mode support masih
- *  bisa memicu forward ke nomor admin — semua jalur itu dijawab "tidak
- *  tersedia" dan TIDAK diteruskan. Balik ke true + tampilkan lagi tombolnya
- *  kalau support mau dihidupkan. Handler + layar support tetap ada. */
-const SUPPORT_ENABLED = false;
+/** Support lewat TIKET (2026-11-21): forward pesan langsung ke Telegram
+ *  admin DIMATIKAN permanen — nomor pribadi Dim tidak boleh tampil ke user.
+ *  User buat tiket dari bot, admin menjawab dari web admin (/admin/tickets),
+ *  balasan diteruskan ke user via Bot API. Lihat src/lib/support-tickets.ts. */
 
 /** Shortcut command di menu "/" Telegram. /menu TIDAK didaftarkan (dobel
  *  dengan /start) — handler /menu di bawah tetap ada buat yang mengetik
@@ -85,6 +91,7 @@ const BOT_COMMANDS: { command: string; description: string }[] = [
   { command: "start", description: "Menu utama toko" },
   { command: "products", description: "Lihat katalog produk" },
   { command: "order", description: "Lacak pesanan" },
+  { command: "support", description: "Buka tiket support" },
   { command: "cancel", description: "Batalkan aksi" },
 ];
 
@@ -94,13 +101,6 @@ function adminIds(): string[] {
 
 function isAdmin(ctx: Context): boolean {
   return !!ctx.from && adminIds().includes(String(ctx.from.id));
-}
-
-function adminChatId(): number | null {
-  const ids = adminIds();
-  if (!ids.length) return null;
-  const n = Number(ids[0]);
-  return Number.isFinite(n) ? n : null;
 }
 
 function uid(ctx: Context): number | null {
@@ -123,12 +123,13 @@ function menuKeyboard(lang: Lang): InlineKeyboard {
   const webAppUrl = getWebAppUrl();
   if (webAppUrl) kb.webApp("🌐 Buka Toko", webAppUrl).row();
   // Menu ala Lhie (2026-11-21): Lihat Produk penuh, Saldo | Pesanan,
-  // Bahasa | Kebijakan. API (Reseller & API) dan Support DISEMBUNYIKAN
-  // dulu (handler-nya tetap ada, tinggal tampilkan lagi tombolnya).
+  // Bahasa | Kebijakan, lalu 💬 Support (tiket — bukan forward ke admin).
+  // API (Reseller & API) DISEMBUNYIKAN dulu (handler-nya tetap ada).
   // Tombol Ikuti Channel hanya muncul kalau channel sudah dikonfigurasi.
   kb.text(s.catalog, "cat").row();
   kb.text(s.myBalance, "wallet").text(s.myOrders, "orders").row();
   kb.text(s.language, "lang").text(s.policy, "policy").row();
+  kb.text(s.support, "support").row();
   const channelUrl = telegramChannelUrl();
   if (channelUrl) kb.url(s.followChannel, channelUrl).row();
   return kb;
@@ -358,17 +359,22 @@ async function showProduct(ctx: Context, productId: string): Promise<void> {
   const product = getCatalogProduct(productId);
   const kb = new InlineKeyboard();
   if (product.stockState !== "available") {
-    const notice =
-      product.stockState === "out_of_stock" ? s.outOfStock : s.comingSoon;
-    await render(ctx, `${product.name}\n\n${notice}`, backToCatalogRow(langOf(id)));
+    // Format stok habis sudah membawa nama produk sendiri — jangan dobel.
+    if (product.stockState === "out_of_stock") {
+      await render(ctx, s.outOfStock(product.name), backToCatalogRow(langOf(id)));
+      return;
+    }
+    await render(
+      ctx,
+      `${product.name}\n\n${s.comingSoon}`,
+      backToCatalogRow(langOf(id)),
+    );
     return;
   }
   if (product.id === "muse-token-1b") {
-    for (const n of QTY_PACKS) {
-      kb.text(`${n}B — ${rupiah(product.retailPriceIdr * n)}`, `qty:${product.id}:${n}`);
-    }
-    kb.row();
-    kb.text("✏️ Jumlah lain…", `qtycustom:${product.id}`).row();
+    // Ala Sondev: kode invite DULU, baru pilih jumlah — paket qty tidak
+    // ditampilkan di detail; muncul setelah kode diterima.
+    kb.text("⚡ Masukkan Kode Invite", `entercode:${product.id}`).row();
   } else {
     kb.text(`🛒 Beli 1 — ${rupiah(product.retailPriceIdr)}`, `qty:${product.id}:1`).row();
   }
@@ -382,7 +388,7 @@ async function showProduct(ctx: Context, productId: string): Promise<void> {
     features: product.features ?? [],
     stock: s.stockLabel(product.stockState),
     targetNote: product.requiresTarget
-      ? `Butuh ${product.targetLabel ?? "target"} saat checkout.`
+      ? "Token dikirim ke akun Muse kamu — masukkan kode invite dulu (buka aplikasi Muse → Invite → salin kode/linknya)."
       : undefined,
   });
   // Detail produk ala Lhie: banner foto produk + caption (tetap 1 pesan).
@@ -428,6 +434,97 @@ async function showProduct(ctx: Context, productId: string): Promise<void> {
 
 // ------------------------------------------------------------ checkout ---
 
+/**
+ * Baca kode invite dari apa pun yang dikirim pembeli — ala bot Sondev:
+ * kode polos ("UVI0QD"), link invite lengkap, atau teks bagikan dari Muse
+ * (bot otomatis mendeteksi kodenya). Yang dikirim ke Sondev sebagai target
+ * adalah KODEnya (docs: target = invite code, cth "ABCD1234EFGH").
+ */
+export function extractInviteCode(text: string): string | null {
+  const t = text.trim();
+  if (!t) return null;
+  const fromLink = /muse\.ai\/invite\/([A-Za-z0-9_-]+)/i.exec(t);
+  if (fromLink) return fromLink[1].toUpperCase();
+  // Kode polos: satu token 4–12 karakter alfanumerik. Kode Muse TIDAK
+  // selalu mengandung angka — "TZVXJR" (huruf semua) adalah kode valid
+  // (ditemukan saat tes Dim 2026-11-21). Format saja tidak bisa membedakan
+  // kata asal-asalan ("hello") dari kode huruf-semua — kode mati baru
+  // ketahuan saat Sondev menebus (lalu refund).
+  if (/^[A-Za-z0-9_-]{4,12}$/.test(t)) {
+    return t.toUpperCase();
+  }
+  // Teks bagikan: cari kode hanya kalau teksnya memang konteks bagikan
+  // (mengandung "invite"/"kode"/link Muse). Kalau tidak, kata biasa
+  // seperti "halo dunia" bukan kode — "HALO" sendiri lolos sebagai token.
+  if (!/invite|kode|muse\.ai/i.test(t)) return null;
+  const stop = new Set(["MUSE", "HTTPS", "HTTP", "INVITE", "TOKEN", "TOKENS", "COM", "WWW", "AI"]);
+  const tokens = t.toUpperCase().match(/[A-Z0-9]{4,12}/g) ?? [];
+  const found = tokens.find((tok) => !stop.has(tok));
+  return found ?? null;
+}
+
+/** Minta kode invite (langkah 1 alur Sondev) + simpan state menunggu. */
+async function askCode(ctx: Context, productId: string): Promise<void> {
+  const id = uid(ctx);
+  if (id == null) return;
+  const s = sOf(id);
+  getSession(id).awaiting = { kind: "code", productId };
+  await render(ctx, s.codePrompt, backRow(langOf(id)));
+}
+
+/**
+ * Kode diterima: tampilkan pilihan jumlah ala Sondev (harga dasar + stok
+ * live dari /stock; gagal baca stok = "Tersedia", jangan blokir checkout).
+ * Draft dibuat di sini — jumlah diisi saat pembeli tap paket.
+ */
+async function showQtyAfterCode(
+  ctx: Context,
+  productId: string,
+  code: string,
+): Promise<void> {
+  const id = uid(ctx);
+  if (id == null) return;
+  const s = sOf(id);
+  const product = getCatalogProduct(productId);
+  const session = getSession(id);
+  session.draft = { productId, qty: 0, target: code, discountIdr: 0 };
+  let stockLabel = s.stockLabel("available");
+  try {
+    const stock = await getSupplier(product.supplier).getStock(
+      product.supplierProductCode,
+    );
+    if (typeof stock === "number") stockLabel = `${stock}B`;
+  } catch {
+    // Stok tidak terbaca — tampilkan "Tersedia", checkout tetap jalan.
+  }
+  const kb = new InlineKeyboard();
+  for (let i = 0; i < QTY_PACKS.length; i += 2) {
+    const a = QTY_PACKS[i];
+    const b = QTY_PACKS[i + 1];
+    if (b === undefined) {
+      kb.text(
+        `${a}B (Maks) (${rupiah(product.retailPriceIdr * a)})`,
+        `qty:${product.id}:${a}`,
+      ).row();
+    } else {
+      kb.text(
+        `${a}B (${rupiah(product.retailPriceIdr * a)})`,
+        `qty:${product.id}:${a}`,
+      ).text(
+        `${b}B (${rupiah(product.retailPriceIdr * b)})`,
+        `qty:${product.id}:${b}`,
+      ).row();
+    }
+  }
+  kb.text("✏️ Jumlah lain…", `qtycustom:${product.id}`).row();
+  kb.text("⬅️ Katalog", "cat").text(s.backMenu, "menu");
+  await render(
+    ctx,
+    s.qtyTitle({ code, price: product.retailPriceIdr, stock: stockLabel }),
+    kb,
+  );
+}
+
 function draftTotals(draft: CheckoutDraft): { subtotal: number; total: number } {
   const product = getCatalogProduct(draft.productId);
   const subtotal = product.retailPriceIdr * draft.qty;
@@ -458,8 +555,8 @@ async function showPay(ctx: Context, draft: CheckoutDraft, notice?: string): Pro
   if (total === 0) {
     kb.text("✅ Proses Order (Gratis)", "pay_wallet").row();
   } else {
-    kb.text(s.payWallet, "pay_wallet").row();
-    kb.text(s.payMidtrans, "pay_midtrans").row();
+    kb.text(`${s.payWallet} (${rupiah(total)})`, "pay_wallet").row();
+    kb.text(`${s.payMidtrans} (${rupiah(total)})`, "pay_midtrans").row();
   }
   kb.text("🎟️ Pakai Promo", "promo_enter").row();
   kb.text("❌ Batal", "cancel_checkout").text(s.backMenu, "menu");
@@ -470,6 +567,7 @@ async function showPay(ctx: Context, draft: CheckoutDraft, notice?: string): Pro
     discount: draft.discountIdr,
     total,
     balance: wallet.balanceIdr,
+    code: draft.target ?? undefined,
   })}`;
   await render(ctx, text, kb);
 }
@@ -481,21 +579,23 @@ async function beginCheckout(ctx: Context, productId: string, qty: number): Prom
   const s = sOf(id);
   const product = getCatalogProduct(productId);
   if (product.stockState !== "available") {
-    const notice =
-      product.stockState === "out_of_stock" ? s.outOfStock : s.comingSoon;
-    await render(ctx, `${product.name}\n\n${notice}`, backToCatalogRow(langOf(id)));
+    if (product.stockState === "out_of_stock") {
+      await render(ctx, s.outOfStock(product.name), backToCatalogRow(langOf(id)));
+      return;
+    }
+    await render(
+      ctx,
+      `${product.name}\n\n${s.comingSoon}`,
+      backToCatalogRow(langOf(id)),
+    );
     return;
   }
   const session = getSession(id);
   const draft: CheckoutDraft = { productId, qty, discountIdr: 0 };
   session.draft = draft;
   if (product.requiresTarget) {
-    session.awaiting = { kind: "target", draft };
-    await render(
-      ctx,
-      s.targetPrompt(product.targetLabel ?? "Target"),
-      backRow(langOf(id)),
-    );
+    // Ala Sondev: kode invite dulu (langkahnya dijelaskan di prompt).
+    await askCode(ctx, productId);
     return;
   }
   await askPromo(ctx, draft);
@@ -515,6 +615,12 @@ async function ensureDraftOrder(
   if (draft.orderId) {
     const existing = await getStoreOrder(draft.orderId);
     if (existing) return { order: existing };
+  }
+  // Cek ulang batas 30x sebelum order dibuat — kode bisa mencapai 30x di
+  // antara input kode dan bayar (dipakai orang lain / order lain). Dicek
+  // sebelum promo ditukar supaya promo tidak hangus sia-sia.
+  if (draft.target && countCodeUses(draft.target) >= 30) {
+    return { error: s.codeUsedUp(draft.target) };
   }
   const orderId = newOrderId();
   if (draft.promoCode && !draft.promoRedeemed) {
@@ -1220,10 +1326,36 @@ async function showSupport(ctx: Context): Promise<void> {
   if (id == null) return;
   const s = sOf(id);
   const kb = new InlineKeyboard()
-    .text("✉️ Kirim Pesan ke Admin", "support_msg")
+    .text("✉️ Buat Tiket Support", "support_msg")
+    .row()
+    .text("🎫 Tiket Saya", "my_tickets")
     .row()
     .text(s.backMenu, "menu");
-  await render(ctx, `${s.supportTitle}\n\nAdmin: ${ADMIN_USERNAME}`, kb);
+  await render(ctx, s.supportTitle, kb);
+}
+
+/** Daftar tiket milik user (id + status + cuplikan pesan pertama). */
+async function showMyTickets(ctx: Context): Promise<void> {
+  const id = uid(ctx);
+  if (id == null) return;
+  const s = sOf(id);
+  const tickets = listTicketsByUser(id, 5);
+  const kb = new InlineKeyboard()
+    .text("✉️ Buat Tiket Baru", "support_msg")
+    .row()
+    .text(s.backMenu, "menu");
+  if (tickets.length === 0) {
+    await render(ctx, `${s.myTicketsTitle}${s.myTicketsEmpty}`, kb);
+    return;
+  }
+  const lines = tickets.map((tk) =>
+    s.myTicketLine(
+      tk.id,
+      tk.subject || "(tanpa judul)",
+      tk.status === "open" ? "🟢 Terbuka" : tk.status === "pending" ? "🟡 Dibalas admin" : "🔒 Ditutup",
+    ),
+  );
+  await render(ctx, `${s.myTicketsTitle}${lines.join("\n\n")}`, kb);
 }
 
 // ------------------------------------------------------------ language ---
@@ -1243,6 +1375,13 @@ async function showLang(ctx: Context): Promise<void> {
 export function createBot(): Bot {
   const token = telegramBotToken();
   const bot = new Bot(token, { client: { fetch: fixedFetch as typeof fetch } });
+
+  // PARALEL antar pengguna, berurutan di dalam satu chat: update dari chat
+  // yang berbeda diproses bersamaan (jadi /start satu orang tidak ngantre
+  // di belakang proses lambat orang lain), tapi dua update dari orang yang
+  // sama tetap berurutan — aman buat session + checkout. Dipakai bareng
+  // @grammyjs/runner di run.ts; dengan bot.start() biasa pun tidak merusak.
+  bot.use(sequentialize((ctx) => ctx.chat?.id.toString()));
 
   // Daftarkan pengguna di DB setiap ada interaksi (upsert murah).
   bot.use(async (ctx, next) => {
@@ -1287,6 +1426,10 @@ export function createBot(): Bot {
   bot.command("products", async (ctx) => {
     if (!(await requireJoined(ctx))) return;
     await showCatalog(ctx);
+  });
+
+  bot.command("support", async (ctx) => {
+    await showSupport(ctx);
   });
 
   bot.command("cancel", async (ctx) => {
@@ -1466,7 +1609,30 @@ export function createBot(): Bot {
   bot.callbackQuery(/^qty:(.+):(\d+)$/, async (ctx) => {
     await answerCb(ctx);
     const qty = Math.min(30, Math.max(1, Number(ctx.match[2])));
+    const id = uid(ctx);
+    // Kode sudah dimasukkan (alur Sondev) -> jumlah langsung ke ringkasan.
+    // Produk harus tetap tersedia — kalau stok habis, jatuh ke beginCheckout
+    // (pesan stok) supaya tombol qty lama tidak bisa memaksa checkout.
+    if (id != null) {
+      const draft = getSession(id).draft;
+      const product = getCatalogProduct(ctx.match[1]);
+      if (
+        draft &&
+        draft.productId === ctx.match[1] &&
+        draft.target &&
+        product.stockState === "available"
+      ) {
+        draft.qty = qty;
+        await showPay(ctx, draft);
+        return;
+      }
+    }
     await beginCheckout(ctx, ctx.match[1], qty);
+  });
+
+  bot.callbackQuery(/^entercode:(.+)$/, async (ctx) => {
+    await answerCb(ctx);
+    await askCode(ctx, ctx.match[1]);
   });
 
   bot.callbackQuery(/^qtycustom:(.+)$/, async (ctx) => {
@@ -1599,10 +1765,6 @@ export function createBot(): Bot {
     await answerCb(ctx);
     const id = uid(ctx);
     if (id == null) return;
-    if (!SUPPORT_ENABLED) {
-      await render(ctx, sOf(id).supportOff, backRow(langOf(id)));
-      return;
-    }
     await showSupport(ctx);
   });
 
@@ -1611,12 +1773,15 @@ export function createBot(): Bot {
     const id = uid(ctx);
     if (id == null) return;
     const s = sOf(id);
-    if (!SUPPORT_ENABLED) {
-      await render(ctx, s.supportOff, backRow(langOf(id)));
-      return;
-    }
-    getSession(id).awaiting = { kind: "support" };
+    getSession(id).awaiting = { kind: "ticket" };
     await render(ctx, s.supportAsk, backRow(langOf(id)));
+  });
+
+  bot.callbackQuery("my_tickets", async (ctx) => {
+    await answerCb(ctx);
+    const id = uid(ctx);
+    if (id == null) return;
+    await showMyTickets(ctx);
   });
 
   bot.callbackQuery("policy", async (ctx) => {
@@ -1657,31 +1822,6 @@ export function createBot(): Bot {
     const s = sOf(id);
     const text = ctx.message.text.trim();
 
-    // Admin membalas pesan support yang diteruskan -> teruskan ke pembeli.
-    if (isAdmin(ctx)) {
-      // grammY mengetikkan reply_to_message sebagai ReplyMessage (tanpa
-      // forward_from) — baca lewat cast, field-nya ada di runtime.
-      const replied = ctx.message.reply_to_message as unknown as {
-        forward_from?: { id: number; is_bot?: boolean };
-      } | null;
-      const forwardedFrom = replied?.forward_from;
-      if (forwardedFrom && !forwardedFrom.is_bot) {
-        try {
-          await ctx.api.sendMessage(
-            forwardedFrom.id,
-            `💬 <b>Balasan admin:</b>\n\n${ctx.message.text}`,
-            { parse_mode: "HTML" },
-          );
-          await ctx.reply("✅ Balasan diteruskan ke pembeli.");
-        } catch (err) {
-          await ctx.reply(
-            `Gagal meneruskan balasan: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-        return;
-      }
-    }
-
     // Perintah (/) sudah ditangani handler command di atas — abaikan di sini.
     if (text.startsWith("/")) {
       await ctx.reply(s.unknownCommand);
@@ -1691,6 +1831,25 @@ export function createBot(): Bot {
     const session = getSession(id);
     const awaiting = session.awaiting;
     if (!awaiting) return; // teks bebas tanpa konteks — abaikan
+
+    // --- Kode invite Muse (alur Sondev) ---
+    if (awaiting.kind === "code") {
+      const code = extractInviteCode(text ?? "");
+      if (!code) {
+        await ctx.reply(s.codeNotFound);
+        return;
+      }
+      // Satu kode maks 30x penebusan (ala Sondev: "This code is used up").
+      // Dihitung dari order berbayar di bot ini — kode yang dipakai di luar
+      // bot tidak terlihat; penebusan ke-31+ tetap gagal di Sondev lalu refund.
+      if (countCodeUses(code) >= 30) {
+        await ctx.reply(s.codeUsedUp(code), { parse_mode: "HTML" });
+        return; // tetap menunggu kode lain
+      }
+      session.awaiting = undefined;
+      await showQtyAfterCode(ctx, awaiting.productId, code);
+      return;
+    }
 
     // --- Target produk on-demand ---
     if (awaiting.kind === "target") {
@@ -1718,6 +1877,19 @@ export function createBot(): Bot {
         return;
       }
       session.awaiting = undefined;
+      // Kode sudah dimasukkan (alur Sondev) -> jumlah langsung ke ringkasan.
+      const draft = session.draft;
+      const product = getCatalogProduct(awaiting.productId);
+      if (
+        draft &&
+        draft.productId === awaiting.productId &&
+        draft.target &&
+        product.stockState === "available"
+      ) {
+        draft.qty = Math.floor(n);
+        await showPay(ctx, draft);
+        return;
+      }
       await beginCheckout(ctx, awaiting.productId, Math.floor(n));
       return;
     }
@@ -1760,24 +1932,23 @@ export function createBot(): Bot {
       return;
     }
 
-    // --- Pesan ke admin (support) — DIMATIKAN: jangan forward ke admin. ---
-    if (awaiting.kind === "support") {
+    // --- Pesan untuk tiket support — TIDAK diteruskan ke admin.
+    //  Tiket baru kalau belum ada yang terbuka; kalau ada tiket terbuka,
+    //  pesan masuk ke tiket itu (status kembali 'open' = butuh admin).
+    if (awaiting.kind === "ticket") {
       session.awaiting = undefined;
-      if (!SUPPORT_ENABLED) {
-        await ctx.reply(s.supportOff);
-        return;
-      }
-      const adminId = adminChatId();
-      if (adminId == null) {
-        await ctx.reply(`${s.supportTitle}\n\nAdmin: ${ADMIN_USERNAME}`);
-        return;
-      }
-      try {
-        await ctx.api.forwardMessage(adminId, ctx.chat.id, ctx.message.message_id);
-        await ctx.reply(s.supportSent);
-      } catch (err) {
-        console.error("[bot] forward support gagal:", err);
-        await ctx.reply(`${s.supportTitle}\n\nAdmin: ${ADMIN_USERNAME}`);
+      const open = getOpenTicketByUser(id);
+      if (open) {
+        addUserMessage(open.id, text);
+        await ctx.reply(s.ticketAppended(open.id), { parse_mode: "HTML" });
+      } else {
+        const ticket = createTicket({
+          tgId: id,
+          username: ctx.from?.username ?? null,
+          firstName: ctx.from?.first_name ?? null,
+          text,
+        });
+        await ctx.reply(s.ticketCreated(ticket.id), { parse_mode: "HTML" });
       }
       return;
     }

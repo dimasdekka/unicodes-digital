@@ -298,15 +298,20 @@ export function createQrisPayment(args: {
   const createdAt = now.toISOString();
   const expiresAt = new Date(now.getTime() + QRIS_PAYMENT_TTL_MS).toISOString();
   expireQrisPayments(now);
-  const taken = listPendingQrisPayments(now).map((p) => p.unique_amount_idr);
-  const { uniqueAmount } = allocateUniqueAmount(args.amountIdr, taken);
-  const qrString = buildDynamicQris(args.staticPayload, uniqueAmount);
-  const id = randomUUID();
-  getDb()
-    .prepare(
+  // Alokasi nominal unik + insert dalam SATU transaksi (BEGIN IMMEDIATE):
+  // dua pembeli bersamaan dengan nominal dasar sama tidak bisa dapat
+  // unique_amount yang sama (tanpa ini, keduanya baca "taken" yang sama
+  // lalu insert duplikat — pembayaran bisa nyasar ke order yang salah).
+  const db = getDb();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const taken = listPendingQrisPayments(now).map((p) => p.unique_amount_idr);
+    const { uniqueAmount } = allocateUniqueAmount(args.amountIdr, taken);
+    const qrString = buildDynamicQris(args.staticPayload, uniqueAmount);
+    const id = randomUUID();
+    db.prepare(
       "INSERT INTO qris_payments (id, reference, amount_idr, unique_amount_idr, qr_string, status, created_at, expires_at) VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)",
-    )
-    .run(
+    ).run(
       id,
       args.reference,
       args.amountIdr,
@@ -315,9 +320,18 @@ export function createQrisPayment(args: {
       createdAt,
       expiresAt,
     );
-  const payment = getQrisPayment(id);
-  if (!payment) throw new Error("Gagal membaca kembali pembayaran QRIS yang baru dibuat");
-  return { payment, qrString };
+    db.exec("COMMIT");
+    const payment = getQrisPayment(id);
+    if (!payment) throw new Error("Gagal membaca kembali pembayaran QRIS yang baru dibuat");
+    return { payment, qrString };
+  } catch (err) {
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // sudah rollback / tidak ada transaksi — abaikan
+    }
+    throw err;
+  }
 }
 
 export function getQrisPayment(id: string): QrisPaymentRow | undefined {

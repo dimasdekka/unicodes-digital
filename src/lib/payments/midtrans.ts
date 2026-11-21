@@ -2,7 +2,7 @@
 // Alasan: webhook resmi + deteksi pasti jalan; hook QRIS GoBiz diblokir
 // Gojek (GoPay-1000) dan rapuh. Biaya QRIS sama (0,7%, 0% di bawah Rp100rb).
 // HANYA QRIS yang diaktifkan (enabled_payments: ["qris"]) — VA/kartu punya
-// fee flat (Rp4.000 / 2,9% + Rp2.000) yang lebih mahal dari produk Rp1.500.
+// fee flat (Rp4.000 / 2,9% + Rp2.000) yang lebih mahal dari produk Rp2.000.
 // Deteksi DUA jalur (sama-sama idempotent, via processMidtransResult di
 // midtrans-poller.ts):
 //   1. Polling status API tiap 30 detik (proses bot) — jalan tanpa domain publik.

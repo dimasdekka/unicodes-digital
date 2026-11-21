@@ -228,6 +228,27 @@ export async function getBuyerStats(
   return { orderCount: row.n, totalSpentIdr: row.total };
 }
 
+/** Berapa kali sebuah kode invite sudah terpakai (order berbayar).
+ *  Satu kode Muse maks 30x penebusan — dihitung dari order di bot ini
+ *  (paid/processing/delivered). Target tersimpan bisa berupa kode polos
+ *  ("UVI0QD") atau link lengkap (".../invite/UVI0QD") — keduanya dihitung.
+ *  Kode yang dipakai di luar bot ini (mis. langsung di bot Sondev) tidak
+ *  terlihat dari sini; penebusan ke-31+ tetap gagal di Sondev lalu refund. */
+export function countCodeUses(code: string): number {
+  const normalized = code.trim().toUpperCase();
+  if (!normalized) return 0;
+  // Escape karakter LIKE (kode bisa mengandung "_").
+  const likeCode = normalized.replace(/[\\%_]/g, (c) => `\\${c}`);
+  const row = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS n FROM store_orders
+        WHERE (target = ? OR target LIKE '%/invite/' || ? ESCAPE '\\')
+          AND status IN ('paid', 'processing', 'delivered')`,
+    )
+    .get(normalized, likeCode) as { n: number };
+  return row.n;
+}
+
 /** Statistik toko untuk layar /start ala Lhie: jumlah pengguna terdaftar
  *  + jumlah order yang sudah berhasil (delivered). Angka nyata dari DB. */
 export function getStoreStats(): {
@@ -306,7 +327,15 @@ export async function markPaid(id: string): Promise<StoreOrder> {
   const order = await getStoreOrder(id);
   if (!order) throw new Error(`Order tidak ditemukan: ${id}`);
   if (order.status !== "awaiting_payment") return order; // idempotent
-  return updateOrder(id, { status: "paid" });
+  // Klaim atomik: dua pemanggil bersamaan (poller QRIS + poller Midtrans /
+  // webhook) hanya satu yang berhasil mengubah status — yang lain baca ulang.
+  const claimed = getDb()
+    .prepare(
+      "UPDATE store_orders SET status = 'paid', updated_at = ? WHERE id = ? AND status = 'awaiting_payment'",
+    )
+    .run(new Date().toISOString(), id);
+  if (claimed.changes === 0) return (await getStoreOrder(id)) ?? order;
+  return (await getStoreOrder(id)) ?? order;
 }
 
 /** Batalkan order yang QR-nya kedaluwarsa sebelum lunas (dipanggil poller).
@@ -320,7 +349,14 @@ export async function cancelOrderForExpiredPayment(
   const order = await getStoreOrder(id);
   if (!order) throw new Error(`Order tidak ditemukan: ${id}`);
   if (order.status !== "awaiting_payment") return order; // sudah dibayar — jangan batalkan
-  return updateOrder(id, { status: "failed", error: reason });
+  // Klaim atomik (alasan sama seperti markPaid).
+  const claimed = getDb()
+    .prepare(
+      "UPDATE store_orders SET status = 'failed', error = ?, updated_at = ? WHERE id = ? AND status = 'awaiting_payment'",
+    )
+    .run(reason, new Date().toISOString(), id);
+  if (claimed.changes === 0) return (await getStoreOrder(id)) ?? order;
+  return (await getStoreOrder(id)) ?? order;
 }
 
 /** Dipanggil webhook Sondev saat order selesai (order.completed / DELIVERED).
@@ -473,14 +509,27 @@ async function failOrder(
 export async function fulfillOrder(orderId: string): Promise<StoreOrder> {
   const order = await getStoreOrder(orderId);
   if (!order) throw new Error(`Order tidak ditemukan: ${orderId}`);
-  if (order.status !== "paid") {
+  // Sudah selesai (delivered/failed): jangan proses ulang — kembalikan saja.
+  if (order.status === "delivered" || order.status === "failed") return order;
+  if (order.status !== "paid" && order.status !== "processing") {
     throw new Error(
       `Order ${orderId} belum dibayar (status: ${order.status})`,
     );
   }
   const product = getCatalogProduct(order.catalogProductId);
   const supplier = getSupplier(product.supplier);
-  await updateOrder(order.id, { status: "processing" });
+  // Klaim atomik paid -> processing: kalau dua fulfill jalan bersamaan
+  // (webhook + poller, atau dua jalur bayar), hanya satu yang mengeksekusi
+  // order ke supplier — yang lain kembalikan status terbaru tanpa belanja
+  // dua kali. Ini yang mencegah double charge Sondev.
+  const claimed = getDb()
+    .prepare(
+      "UPDATE store_orders SET status = 'processing', updated_at = ? WHERE id = ? AND status = 'paid'",
+    )
+    .run(new Date().toISOString(), order.id);
+  if (claimed.changes === 0) {
+    return (await getStoreOrder(order.id)) ?? order;
+  }
 
   try {
     // 1) Cek saldo supplier sebelum belanja. Kalau SUDAH PASTI tidak cukup,

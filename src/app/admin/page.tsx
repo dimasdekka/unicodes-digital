@@ -1,13 +1,17 @@
 import { cookies } from "next/headers";
 import { listActiveProducts } from "@/lib/catalog";
-import { listStoreOrders } from "@/lib/orders";
+import { getDb } from "@/lib/db";
+import { getStoreStats, listStoreOrders } from "@/lib/orders";
+import { getPriceOverride } from "@/lib/product-prices";
 import { getSupplier } from "@/lib/suppliers";
 import type { SupplierId } from "@/lib/suppliers/types";
+import { countOpenTickets } from "@/lib/support-tickets";
 import { ADMIN_COOKIE, adminPasswordHash, isAdminCookieValid } from "@/lib/admin-auth";
 import {
   extractMerchantInfo,
   getGopayStaticQris,
 } from "@/lib/payments/qris-settings";
+import AdminNav from "./nav";
 import QrisPanel, { type QrisStatus } from "./qris-panel";
 
 // Halaman admin dilindungi login password (cookie, lihat /api/admin/login).
@@ -97,6 +101,29 @@ export default async function AdminPage({
     supplierBalance("lahastore"),
   ]);
   const products = listActiveProducts();
+  const store = getStoreStats();
+  const orderTotals = getDb()
+    .prepare(
+      `SELECT COUNT(*) AS total,
+        COALESCE(SUM(CASE WHEN status = 'delivered' THEN retail_total_idr ELSE 0 END), 0) AS revenue
+        FROM store_orders`,
+    )
+    .get() as { total: number; revenue: number };
+  const openTickets = countOpenTickets();
+  const users = getDb()
+    .prepare(
+      `SELECT u.tg_id AS tgId, u.first_name AS firstName, u.username AS username,
+          COALESCE(w.balance_idr, 0) AS balanceIdr, u.created_at AS createdAt
+        FROM users u LEFT JOIN wallets w ON w.tg_id = u.tg_id
+        ORDER BY u.created_at DESC LIMIT 50`,
+    )
+    .all() as {
+    tgId: number;
+    firstName: string | null;
+    username: string | null;
+    balanceIdr: number;
+    createdAt: string;
+  }[];
 
   // Status awal QRIS GoPay untuk panel (string lengkap tidak dikirim ke client).
   const storedQris = getGopayStaticQris();
@@ -127,12 +154,29 @@ export default async function AdminPage({
 
   return (
     <>
+      <AdminNav active="/admin" />
       <h1>Admin — Unicodes Digital</h1>
-      <p>
-        <a href="/api/admin/logout" style={{ color: "#b3a1e6", fontSize: 13 }}>
-          Keluar
-        </a>
-      </p>
+
+      <h2>Dashboard</h2>
+      <ul>
+        <li>
+          👥 Total pengguna: <strong>{store.totalUsers}</strong>
+        </li>
+        <li>
+          📦 Total order: <strong>{orderTotals.total}</strong> · ✅ Terkirim:{" "}
+          <strong>{store.deliveredOrders}</strong>
+        </li>
+        <li>
+          💰 Revenue (order terkirim):{" "}
+          <strong>{rupiah(orderTotals.revenue)}</strong>
+        </li>
+        <li>
+          🎫 Tiket support terbuka: <strong>{openTickets}</strong>{" "}
+          <a href="/admin/tickets" style={{ color: "#d9b45b" }}>
+            Lihat tiket →
+          </a>
+        </li>
+      </ul>
 
       <h2>Saldo supplier</h2>
       <ul>
@@ -165,17 +209,89 @@ export default async function AdminPage({
 
       <h2>Produk &amp; harga retail</h2>
       <ul>
-        {products.map((p) => (
-          <li key={p.id}>
-            {p.name} — {rupiah(p.retailPriceIdr)} (via {p.supplier})
-            {!p.active ? " [nonaktif]" : ""}
-          </li>
-        ))}
+        {products.map((p) => {
+          const override = getPriceOverride(p.id);
+          return (
+            <li key={p.id} style={{ marginBottom: 10 }}>
+              {p.name} — {rupiah(p.retailPriceIdr)} (via {p.supplier})
+              {!p.active ? " [nonaktif]" : ""}
+              {override !== null ? " [harga diubah dari admin]" : ""}
+              <form
+                action={`/api/admin/products/${p.id}/price`}
+                method="post"
+                style={{ display: "inline", marginLeft: 12 }}
+              >
+                <input
+                  type="number"
+                  name="price"
+                  defaultValue={p.retailPriceIdr}
+                  min={500}
+                  max={10000000}
+                  step={100}
+                  required
+                  style={{
+                    width: 110,
+                    padding: 6,
+                    background: "#14092b",
+                    border: "1px solid #6d28d9",
+                    borderRadius: 6,
+                    color: "#ede9fe",
+                  }}
+                />{" "}
+                <button
+                  type="submit"
+                  style={{
+                    background: "#7c3aed",
+                    color: "#fff",
+                    border: "none",
+                    borderRadius: 6,
+                    padding: "6px 12px",
+                    cursor: "pointer",
+                  }}
+                >
+                  Ubah harga
+                </button>
+              </form>
+            </li>
+          );
+        })}
       </ul>
       <p style={{ color: "#b3a1e6", fontSize: 13 }}>
-        Harga retail masih diatur di <code>src/lib/catalog.ts</code> — panel
-        ubah harga dari admin masih TODO.
+        Harga dasar ada di <code>src/lib/catalog.ts</code> — ubah di sini
+        menyimpan override ke database (harga dasar tidak berubah).
       </p>
+
+      <h2>Pengguna ({users.length})</h2>
+      {users.length === 0 ? (
+        <p>Belum ada pengguna.</p>
+      ) : (
+        <table cellPadding={6} style={{ borderCollapse: "collapse" }}>
+          <thead>
+            <tr>
+              <th align="left">ID</th>
+              <th align="left">Nama</th>
+              <th align="left">Username</th>
+              <th align="left">Saldo</th>
+              <th align="left">Daftar</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.map((u) => (
+              <tr key={u.tgId} style={{ borderTop: "1px solid #6d28d9" }}>
+                <td>{u.tgId}</td>
+                <td>{u.firstName ?? "—"}</td>
+                <td>{u.username ? `@${u.username}` : "—"}</td>
+                <td>{rupiah(u.balanceIdr)}</td>
+                <td style={{ fontSize: 12, color: "#b3a1e6" }}>
+                  {new Date(u.createdAt).toLocaleDateString("id-ID", {
+                    timeZone: "Asia/Jakarta",
+                  })}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
 
       <h2>Order terbaru ({orders.length})</h2>
       {orders.length === 0 ? (

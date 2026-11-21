@@ -7,6 +7,7 @@
 import dotenv from "dotenv";
 dotenv.config({ path: ".env.local" });
 import { createBot } from "./bot";
+import { run } from "@grammyjs/runner";
 import { gopayPollIntervalMs } from "../lib/config";
 import { tickQrisPayments } from "../lib/payments/qris-poller";
 import { tickMidtransPayments } from "../lib/payments/midtrans-poller";
@@ -20,9 +21,12 @@ bot.catch((err) => {
   console.error("[bot] error:", err);
 });
 
-bot.start().then(() => {
-  console.log("Unicodes Digital bot jalan (long polling)...");
-});
+// Runner (@grammyjs/runner): update dari pengguna berbeda diproses PARALEL
+// (bot.start() bawaan grammY berurutan — satu handler lambat bikin /start
+// orang lain ngantre). sequentialize di bot.ts menjaga update dari satu
+// chat tetap berurutan. runner.stop() = shutdown yang benar untuk runner.
+const runner = run(bot);
+console.log("Unicodes Digital bot jalan (long polling, runner paralel)...");
 
 // Poller pembayaran — SATU-SATUNYA tempat pembayaran dinyatakan lunas
 // (QRIS GoBiz di qris-poller.ts, Midtrans di midtrans-poller.ts). Jalan di
@@ -63,5 +67,5 @@ async function pollOnce(): Promise<void> {
 setInterval(() => void pollOnce(), gopayPollIntervalMs());
 setTimeout(() => void pollOnce(), 10_000); // tick pertama 10 detik setelah start
 
-process.once("SIGINT", () => bot.stop());
-process.once("SIGTERM", () => bot.stop());
+process.once("SIGINT", () => void runner.stop());
+process.once("SIGTERM", () => void runner.stop());

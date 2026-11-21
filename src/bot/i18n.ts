@@ -61,12 +61,20 @@ export interface Strings {
     targetNote?: string;
   }) => string;
   comingSoon: string;
-  outOfStock: string;
+  outOfStock: (name: string) => string;
+  /** Kode invite sudah dipakai 30x (maks penebusan Muse). */
+  codeUsedUp: (code: string) => string;
   stockLabel: (state: StockState) => string;
   qtyPrompt: string;
   qtyCustomPrompt: string;
   qtyInvalid: string;
   targetPrompt: (label: string) => string;
+  /** Langkah-langkah kode invite ala Sondev (kode dulu, baru jumlah). */
+  codePrompt: string;
+  /** Teks kiriman tidak mengandung kode invite yang bisa dibaca. */
+  codeNotFound: string;
+  /** Layar pilih jumlah setelah kode diterima (harga dasar + stok live). */
+  qtyTitle: (p: { code: string; price: number; stock: string }) => string;
   promoAsk: string;
   promoEnterPrompt: string;
   promoApplied: (code: string, discount: number) => string;
@@ -79,6 +87,8 @@ export interface Strings {
     discount: number;
     total: number;
     balance: number;
+    /** Kode invite (hanya produk on-demand) — tampil di ringkasan. */
+    code?: string;
   }) => string;
   payWallet: string;
   payQris: string;
@@ -142,10 +152,14 @@ export interface Strings {
   promoTitle: string;
   supportTitle: string;
   supportAsk: string;
-  supportSent: string;
-  supportOff: string;
-  supportForwarded: (name: string, tgId: number, text: string) => string;
-  supportReplyHint: string;
+  /** Tiket baru dibuat dari pesan user. */
+  ticketCreated: (id: string) => string;
+  /** Pesan user ditambahkan ke tiket yang masih terbuka. */
+  ticketAppended: (id: string) => string;
+  /** Daftar tiket milik user (layar "Tiket Saya"). */
+  myTicketsTitle: string;
+  myTicketsEmpty: string;
+  myTicketLine: (id: string, subject: string, status: string) => string;
   policyTitle: string;
   resellerTitle: string;
   langTitle: string;
@@ -182,20 +196,25 @@ const id: Strings = {
             ? "🌇"
             : "🌙";
     return (
-      `${icon} ${greet}, ${p.name} — selamat datang di UNICODES DIGITAL\n` +
-      `————————————————\n` +
-      `🙀 Profil Saya\n` +
-      `🛡️ ID Telegram: ${p.tgId}\n` +
-      `💸 Username: ${p.username ? `@${p.username}` : "—"}\n` +
-      `💵 Total Transaksi: ${rupiah(p.totalSpentIdr)}\n` +
-      `💰 Saldo Saya: ${rupiah(p.balanceIdr)}\n\n` +
-      `📊 Aktivitas Toko\n` +
-      `😎 Pengguna Telegram: ${p.totalUsers}\n` +
-      `🧾 Pesanan berhasil: ${p.deliveredOrders}\n\n` +
+      `✦ UNICODES DIGITAL\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `${icon} ${greet}, ${p.name}!\n` +
+      `Selamat datang di toko digital kami.\n\n` +
+      `👤 INFORMASI AKUN\n` +
+      `┌ ID Telegram : ${p.tgId}\n` +
+      `├ Username    : ${p.username ? `@${p.username}` : "—"}\n` +
+      `├ Total Belanja : ${rupiah(p.totalSpentIdr)}\n` +
+      `└ Saldo Aktif : ${rupiah(p.balanceIdr)}\n\n` +
+      `📊 STATISTIK TOKO\n` +
+      `├ 👥 Total Pengguna : ${p.totalUsers}\n` +
+      `└ ✅ Pesanan Sukses : ${p.deliveredOrders}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `✨ Semua kebutuhan digitalmu,\n` +
+      `   dalam satu tempat.\n\n` +
       (p.channelUrl
         ? `📣 Promo, update stok, dan bukti transaksi terbaru tersedia di channel resmi Unicodes Digital.\n\n`
         : "") +
-      `Mau ngapain dulu? Pilih tombol di bawah ya.`
+      `Silakan pilih menu di bawah untuk mulai`
     );
   },
   menuPrompt: "Pilih menu di bawah:",
@@ -222,7 +241,10 @@ const id: Strings = {
     (p.features.length ? p.features.map((f) => `✅ ${f}`).join("\n") + "\n" : "") +
     (p.targetNote ? `\n🎯 ${p.targetNote}` : ""),
   comingSoon: "⏳ Segera hadir — produk ini belum bisa dibeli sekarang. Cek lagi nanti ya!",
-  outOfStock: "🔴 Stok habis — produk ini sedang kosong. Cek lagi nanti ya!",
+  outOfStock: (name) =>
+    `❌ Stok Habis\n━━━━━━━━━━━━━━\n✨ ${name}\nProduk ini sedang habis dan belum bisa dipesan.\n\nCoba lihat katalog untuk produk lain ya.`,
+  codeUsedUp: (code) =>
+    `🚫 Kode <code>${code}</code> sudah dipakai 30x. Muse tidak menerima penebusan lagi untuk kode ini — pakai kode invite lain ya.`,
   stockLabel: (state) =>
     state === "available" ? "Tersedia" : state === "out_of_stock" ? "Stok Habis" : "Segera Hadir",
   qtyPrompt: "Pilih jumlah yang mau dibeli:",
@@ -230,7 +252,21 @@ const id: Strings = {
     "Ketik jumlah yang mau dibeli (angka 1–30), atau /cancel untuk batal.",
   qtyInvalid: "Jumlah harus angka 1–30. Coba lagi, atau /cancel untuk batal.",
   targetPrompt: (label) =>
-    `🎯 Kirim ${label} kamu di chat ini (satu pesan).\n\nContoh: https://muse.ai/invite/3015497298687799`,
+    `🎯 Kirim ${label} kamu di chat ini (satu pesan).\n\nLink ini buat nunjukin tokennya dikirim ke akun Muse yang mana.\nCara ambil: buka aplikasi Muse → Invite → salin link.`,
+  codePrompt:
+    `⚡ Masukkan Kode Invite Muse\n\n` +
+    `1️⃣ Buka aplikasi Muse → menu Invite Friends / Referrals, salin teks bagikan atau kode invite kamu.\n` +
+    `2️⃣ Kirim ke chat ini — kode aja boleh (cth: UVI0QD), atau link/teks lengkapnya (bot otomatis baca kodenya).\n` +
+    `3️⃣ Tunggu sebentar — token masuk ke akun Muse kamu.\n\n` +
+    `💡 Satu kode cuma bisa dipakai 30 kali (1B sekali tebus, maks 30B per akun).\n\n` +
+    `Contoh:\nUVI0QD`,
+  codeNotFound:
+    "❌ Format kode salah — kode tidak ketemu. Kirim kode invite kamu (cth: UVI0QD) atau link invite lengkapnya.",
+  qtyTitle: (p) =>
+    `⚡ Kode Invite Muse: <code>${p.code}</code>\n\n` +
+    `Harga dasar: ${rupiah(p.price)} / 1B token.\n` +
+    `📦 Stok ready: ${p.stock}\n\n` +
+    `Pilih jumlah token yang mau ditebus:`,
   promoAsk:
     "Punya kode promo? Ketik kodenya di chat ini, atau tap “Lewati” untuk lanjut tanpa promo.",
   promoEnterPrompt: "Ketik kode promo kamu (satu pesan), atau /cancel untuk batal.",
@@ -246,11 +282,13 @@ const id: Strings = {
           : "❌ Kode promo ini sudah pernah kamu pakai.",
   promoSkipped: "Lanjut tanpa promo.",
   payTitle: (p) =>
-    `🧾 <b>Ringkasan Order</b>\n\n${p.name} × ${p.qty}\n` +
-    `Subtotal: ${rupiah(p.subtotal)}\n` +
-    (p.discount > 0 ? `Diskon promo: −${rupiah(p.discount)}\n` : "") +
-    `Total bayar: <b>${rupiah(p.total)}</b>\n` +
-    `💳 Saldo kamu: ${rupiah(p.balance)}\n\nPilih cara bayar:`,
+    `💳 <b>RINGKASAN PEMBAYARAN</b>\n────────────────\n📦 Produk: ${p.name} × ${p.qty}\n` +
+    (p.code ? `⚡ Kode Invite: <code>${p.code}</code>\n` : "") +
+    (p.discount > 0
+      ? `Subtotal: ${rupiah(p.subtotal)}\n🎟️ Diskon promo: −${rupiah(p.discount)}\n`
+      : "") +
+    `💰 Total: <b>${rupiah(p.total)}</b>\n` +
+    `💳 Saldo kamu: ${rupiah(p.balance)}\n────────────────\n\nPilih cara bayar di bawah:`,
   payWallet: "💳 Bayar dari Saldo",
   payQris: "💳 Bayar via QRIS",
   payWalletShort: "💳 Saldo",
@@ -287,7 +325,7 @@ const id: Strings = {
   joinChannelCheckButton: "✅ Saya Sudah Join",
   joinChannelNotYet:
     "⏳ Belum terdeteksi — pastikan kamu sudah join channel-nya, lalu tap tombol ini lagi.",
-  payMidtrans: "💳 Bayar via Midtrans",
+  payMidtrans: "⚡ QRIS",
   midtransOpenButton: "💳 Buka Pembayaran",
   midtransLink: (orderId, total, expiresAt) =>
     `💳 <b>Pembayaran Midtrans</b>\n\nOrder: <code>${orderId}</code>\nTotal: <b>${rupiah(total)}</b>\n\nTap tombol di bawah untuk bayar (QRIS) — link berlaku sampai ${wibTime(expiresAt)} WIB (30 menit).\n\nSetelah bayar, tap '✅ Saya Sudah Bayar' atau tunggu dicek otomatis.`,
@@ -350,22 +388,27 @@ const id: Strings = {
   promoTitle:
     "🎟️ <b>Promo</b>\n\nPunya kode promo? Masukkan kodenya saat checkout — diskon langsung memotong total bayar. Satu kode hanya bisa dipakai sekali per pengguna.",
   supportTitle:
-    "💬 <b>Support</b>\n\nAda kendala order / pembayaran? Hubungi admin: @Dimas0227\n\nAtau kirim pesan langsung dari sini — admin akan membalas ke chat ini.",
-  supportAsk: "✉️ Tulis pesan kamu untuk admin (satu pesan), atau /cancel untuk batal.",
-  supportSent: "✅ Pesan kamu sudah diteruskan ke admin. Tunggu balasannya di chat ini ya.",
-  supportOff: "💬 Support sedang tidak tersedia untuk saat ini.",
-  supportForwarded: (name, tgId, text) =>
-    `📩 <b>Pesan support</b> dari ${name} (tg:${tgId}):\n\n${text}\n\n<i>Balas pesan ini (reply) untuk menjawab pembeli.</i>`,
-  supportReplyHint: "Balas pesan support yang diteruskan (reply) untuk menjawab pembeli.",
+    "💬 <b>Support</b>\n\nAda kendala order / pembayaran? Buat tiket support — admin akan membalas langsung di chat ini.\n\nTap tombol di bawah untuk kirim pesan pertama kamu.",
+  supportAsk:
+    "✉️ Jelaskan kendala kamu dalam satu pesan — sebutkan juga nomor order kalau ada (cth: UD-XXXXXX). Admin akan membalas lewat tiket ini.\n\nAtau /cancel untuk batal.",
+  ticketCreated: (id) =>
+    `✅ Tiket <code>${id}</code> dibuat. Admin akan membalas di chat ini — cek status tiketmu di menu 💬 Support.`,
+  ticketAppended: (id) =>
+    `✅ Pesanmu ditambahkan ke tiket <code>${id}</code> yang masih terbuka. Admin akan membalas di chat ini.`,
+  myTicketsTitle: "🎫 <b>Tiket Support Saya</b>\n\n",
+  myTicketsEmpty:
+    "Kamu belum punya tiket support. Tap tombol di bawah untuk buat tiket baru.",
+  myTicketLine: (id, subject, status) =>
+    `<code>${id}</code> — ${status}\n${subject}`,
   policyTitle:
     "📜 <b>Kebijakan Toko</b>\n\n" +
-    "🚀 <b>Pengiriman</b>\nProduk digital dikirim instan setelah pembayaran lunas. Proses ke supplier maksimal 10 menit — kalau lebih dari itu, hubungi support.\n\n" +
-    "↩️ <b>Refund</b>\nKalau fulfillment gagal setelah kamu bayar: bayar saldo kembali ke dompet otomatis; bayar QRIS ditransfer balik manual oleh admin (maks. 1 hari kerja) — hubungi support kalau belum masuk.\n\n" +
+    "🚀 <b>Pengiriman</b>\nProduk digital dikirim instan setelah pembayaran lunas. Proses ke supplier maksimal 10 menit — kalau lebih dari itu, buka tiket support lewat tombol 💬 Support.\n\n" +
+    "↩️ <b>Refund</b>\nKalau fulfillment gagal setelah kamu bayar: bayar saldo kembali ke dompet otomatis; bayar QRIS ditransfer balik manual oleh admin (maks. 1 hari kerja) — kalau belum masuk, buka tiket support lewat tombol 💬 Support.\n\n" +
     "🛡️ <b>Garansi</b>\nAkun bergaransi penggantian 1 hari sejak diterima, selama dipakai sesuai aturan produk. Token yang sudah dipakai tidak bisa digaransi.\n\n" +
     "💳 <b>Pembayaran</b>\nQRIS dinamis (GoPay, OVO, DANA, m-banking apa pun) atau saldo dompet.\n\n" +
-    "📩 <b>Bantuan</b>\nSupport: @Dimas0227",
+    "📩 <b>Bantuan</b>\nButuh bantuan? Buka tiket support lewat tombol 💬 Support di menu utama — admin akan membalas langsung di chat ini.",
   resellerTitle:
-    "🤝 <b>Reseller & API</b>\n\nProgram reseller & API akses masih disiapkan — segera hadir.\n\nMau jadi reseller Unicodes Digital lebih awal? Hubungi admin: @Dimas0227",
+    "🤝 <b>Reseller & API</b>\n\nProgram reseller & API akses masih disiapkan — segera hadir. Pantau terus info terbaru di toko ini.",
   langTitle: "🌐 <b>Bahasa / Language</b>\n\nPilih bahasa bot:",
   langSet: "✅ Bahasa diubah ke Bahasa Indonesia.",
   orderNotFound: "Order tidak ditemukan.",
@@ -400,20 +443,25 @@ const en: Strings = {
             ? "🌇"
             : "🌙";
     return (
-      `${icon} ${greet}, ${p.name} — welcome to UNICODES DIGITAL\n` +
-      `————————————————\n` +
-      `🙀 My Profile\n` +
-      `🛡️ Telegram ID: ${p.tgId}\n` +
-      `💸 Username: ${p.username ? `@${p.username}` : "—"}\n` +
-      `💵 Total Spent: ${rupiah(p.totalSpentIdr)}\n` +
-      `💰 My Balance: ${rupiah(p.balanceIdr)}\n\n` +
-      `📊 Store Activity\n` +
-      `😎 Telegram Users: ${p.totalUsers}\n` +
-      `🧾 Successful Orders: ${p.deliveredOrders}\n\n` +
+      `✦ UNICODES DIGITAL\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `${icon} ${greet}, ${p.name}!\n` +
+      `Welcome to our digital store.\n\n` +
+      `👤 ACCOUNT INFO\n` +
+      `┌ Telegram ID : ${p.tgId}\n` +
+      `├ Username    : ${p.username ? `@${p.username}` : "—"}\n` +
+      `├ Total Spent : ${rupiah(p.totalSpentIdr)}\n` +
+      `└ Active Balance : ${rupiah(p.balanceIdr)}\n\n` +
+      `📊 STORE STATS\n` +
+      `├ 👥 Total Users : ${p.totalUsers}\n` +
+      `└ ✅ Successful Orders : ${p.deliveredOrders}\n\n` +
+      `━━━━━━━━━━━━━━━━━━\n` +
+      `✨ All your digital needs,\n` +
+      `   in one place.\n\n` +
       (p.channelUrl
         ? `📣 Promos, stock updates, and the latest transaction proofs are available on the official Unicodes Digital channel.\n\n`
         : "") +
-      `What would you like to do first? Pick a button below.`
+      `Please choose a menu below to start`
     );
   },
   menuPrompt: "Pick a menu below:",
@@ -440,14 +488,31 @@ const en: Strings = {
     (p.features.length ? p.features.map((f) => `✅ ${f}`).join("\n") + "\n" : "") +
     (p.targetNote ? `\n🎯 ${p.targetNote}` : ""),
   comingSoon: "⏳ Coming soon — this product can't be bought yet. Check back later!",
-  outOfStock: "🔴 Out of stock — this product is currently unavailable. Check back later!",
+  outOfStock: (name) =>
+    `❌ Out of Stock\n━━━━━━━━━━━━━━\n✨ ${name}\nThis product is currently out of stock and can't be ordered.\n\nCheck the catalog for other products.`,
+  codeUsedUp: (code) =>
+    `🚫 Code <code>${code}</code> is used up. Muse will not accept any further redemptions on it — please use a different invite code.`,
   stockLabel: (state) =>
     state === "available" ? "Available" : state === "out_of_stock" ? "Out of stock" : "Coming soon",
   qtyPrompt: "Choose how many you want to buy:",
   qtyCustomPrompt: "Type the quantity (a number 1–30), or /cancel to abort.",
   qtyInvalid: "Quantity must be a number 1–30. Try again, or /cancel to abort.",
   targetPrompt: (label) =>
-    `🎯 Send your ${label} here in this chat (one message).\n\nExample: https://muse.ai/invite/3015497298687799`,
+    `🎯 Send your ${label} here in this chat (one message).\n\nThis tells us which Muse account the tokens go to.\nHow to get it: open the Muse app → Invite → copy the link.`,
+  codePrompt:
+    `⚡ Enter your Muse Invite Code\n\n` +
+    `1️⃣ Open the Muse app → Invite Friends / Referrals menu, copy the share text or your invite code.\n` +
+    `2️⃣ Send it here — just the code works (e.g. UVI0QD), or the full link/text (the bot auto-detects the code).\n` +
+    `3️⃣ Give it a moment — tokens land in your Muse account.\n\n` +
+    `💡 One code can be redeemed 30 times (1B per redemption, 30B ceiling per account).\n\n` +
+    `Example:\nUVI0QD`,
+  codeNotFound:
+    "❌ Wrong code format — no code found. Send your invite code (e.g. UVI0QD) or the full invite link.",
+  qtyTitle: (p) =>
+    `⚡ Muse Invite Code: <code>${p.code}</code>\n\n` +
+    `Base price: ${rupiah(p.price)} / 1B tokens.\n` +
+    `📦 Stock ready: ${p.stock}\n\n` +
+    `Select the token quantity you want to redeem:`,
   promoAsk:
     "Have a promo code? Type it here, or tap “Skip” to continue without one.",
   promoEnterPrompt: "Type your promo code (one message), or /cancel to abort.",
@@ -463,11 +528,13 @@ const en: Strings = {
           : "❌ You've already used this promo code.",
   promoSkipped: "Continuing without a promo.",
   payTitle: (p) =>
-    `🧾 <b>Order Summary</b>\n\n${p.name} × ${p.qty}\n` +
-    `Subtotal: ${rupiah(p.subtotal)}\n` +
-    (p.discount > 0 ? `Promo discount: −${rupiah(p.discount)}\n` : "") +
-    `Total to pay: <b>${rupiah(p.total)}</b>\n` +
-    `💳 Your balance: ${rupiah(p.balance)}\n\nChoose a payment method:`,
+    `💳 <b>ORDER PAYMENT SUMMARY</b>\n────────────────\n📦 Product: ${p.name} × ${p.qty}\n` +
+    (p.code ? `⚡ Invite Code: <code>${p.code}</code>\n` : "") +
+    (p.discount > 0
+      ? `Subtotal: ${rupiah(p.subtotal)}\n🎟️ Promo discount: −${rupiah(p.discount)}\n`
+      : "") +
+    `💰 Total: <b>${rupiah(p.total)}</b>\n` +
+    `💳 Your balance: ${rupiah(p.balance)}\n────────────────\n\nSelect your payment method below:`,
   payWallet: "💳 Pay from Balance",
   payQris: "💳 Pay via QRIS",
   payWalletShort: "💳 Balance",
@@ -504,7 +571,7 @@ const en: Strings = {
   joinChannelCheckButton: "✅ I've Joined",
   joinChannelNotYet:
     "⏳ Not detected yet — make sure you've joined the channel, then tap this button again.",
-  payMidtrans: "💳 Pay via Midtrans",
+  payMidtrans: "⚡ QRIS",
   midtransOpenButton: "💳 Open Payment",
   midtransLink: (orderId, total, expiresAt) =>
     `💳 <b>Midtrans Payment</b>\n\nOrder: <code>${orderId}</code>\nTotal: <b>${rupiah(total)}</b>\n\nTap the button below to pay (QRIS) — link valid until ${wibTime(expiresAt)} WIB (30 minutes).\n\nAfter paying, tap '✅ I've Paid' or wait for the automatic check.`,
@@ -566,22 +633,27 @@ const en: Strings = {
   promoTitle:
     "🎟️ <b>Promo</b>\n\nHave a promo code? Enter it at checkout — the discount cuts your total right away. Each code can be used once per user.",
   supportTitle:
-    "💬 <b>Support</b>\n\nOrder / payment issues? Contact admin: @Dimas0227\n\nOr send a message right from here — the admin will reply in this chat.",
-  supportAsk: "✉️ Write your message to the admin (one message), or /cancel to abort.",
-  supportSent: "✅ Your message was forwarded to the admin. They'll reply here.",
-  supportOff: "💬 Support is currently unavailable.",
-  supportForwarded: (name, tgId, text) =>
-    `📩 <b>Support message</b> from ${name} (tg:${tgId}):\n\n${text}\n\n<i>Reply to this message to answer the buyer.</i>`,
-  supportReplyHint: "Reply to a forwarded support message to answer the buyer.",
+    "💬 <b>Support</b>\n\nOrder / payment issues? Open a support ticket — the admin will reply right here in this chat.\n\nTap the button below to send your first message.",
+  supportAsk:
+    "✉️ Describe your issue in one message — include your order number if you have one (e.g. UD-XXXXXX). The admin will reply via this ticket.\n\nOr /cancel to abort.",
+  ticketCreated: (id) =>
+    `✅ Ticket <code>${id}</code> created. The admin will reply here in this chat — check your ticket status in the 💬 Support menu.`,
+  ticketAppended: (id) =>
+    `✅ Your message was added to your still-open ticket <code>${id}</code>. The admin will reply here in this chat.`,
+  myTicketsTitle: "🎫 <b>My Support Tickets</b>\n\n",
+  myTicketsEmpty:
+    "You don't have any support tickets yet. Tap the button below to open a new one.",
+  myTicketLine: (id, subject, status) =>
+    `<code>${id}</code> — ${status}\n${subject}`,
   policyTitle:
     "📜 <b>Store Policy</b>\n\n" +
-    "🚀 <b>Delivery</b>\nDigital products are delivered instantly after payment. Supplier processing takes at most 10 minutes — if it takes longer, contact support.\n\n" +
-    "↩️ <b>Refund</b>\nIf fulfillment fails after you paid: balance payments go back to your wallet automatically; QRIS payments are refunded manually by the admin (max 1 business day) — contact support if it hasn't arrived.\n\n" +
+    "🚀 <b>Delivery</b>\nDigital products are delivered instantly after payment. Supplier processing takes at most 10 minutes — if it takes longer, open a support ticket via the 💬 Support button.\n\n" +
+    "↩️ <b>Refund</b>\nIf fulfillment fails after you paid: balance payments go back to your wallet automatically; QRIS payments are refunded manually by the admin (max 1 business day) — if it hasn't arrived, open a support ticket via the 💬 Support button.\n\n" +
     "🛡️ <b>Warranty</b>\nAccounts come with a 1-day replacement warranty from delivery, when used per the product rules. Tokens already used can't be warrantied.\n\n" +
     "💳 <b>Payment</b>\nDynamic QRIS (GoPay, OVO, DANA, any mobile banking) or wallet balance.\n\n" +
-    "📩 <b>Help</b>\nSupport: @Dimas0227",
+    "📩 <b>Help</b>\nNeed help? Open a support ticket via the 💬 Support button in the main menu — the admin will reply right here in this chat.",
   resellerTitle:
-    "🤝 <b>Reseller & API</b>\n\nThe reseller & API program is still being prepared — coming soon.\n\nWant to become a Unicodes Digital reseller early? Contact admin: @Dimas0227",
+    "🤝 <b>Reseller & API</b>\n\nThe reseller & API program is still being prepared — coming soon. Stay tuned for updates here in the store.",
   langTitle: "🌐 <b>Language</b>\n\nChoose the bot language:",
   langSet: "✅ Language changed to English.",
   orderNotFound: "Order not found.",
