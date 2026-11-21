@@ -126,6 +126,21 @@ export async function getTransactionStatus(
     },
   );
   const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  // Transaksi Snap BELUM ADA di sistem Midtrans sampai pembeli membuka
+  // halaman bayar — status API menjawab 404 ("Transaction doesn't exist",
+  // kadang HTTP 200 dengan status_code "404" di body). Itu BUKAN gagal:
+  // perlakukan sebagai pending; expiry sweep 30 menit yang menutupnya
+  // kalau pembeli tidak pernah membuka link.
+  if (
+    res.status === 404 ||
+    data.status_code === "404" ||
+    data.status_code === 404
+  ) {
+    return {
+      ...data,
+      transaction_status: "pending",
+    } as unknown as MidtransStatusBody;
+  }
   if (!res.ok) {
     const msg =
       typeof data.status_message === "string"

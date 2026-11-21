@@ -170,6 +170,30 @@ async function main(): Promise<void> {
         }),
       } as unknown as Response;
     }
+    if (url.includes("/v2/UD-MT-BELUM-DIBUKA/status")) {
+      // Snap baru yang pembelinya belum buka halaman bayar: Midtrans
+      // menjawab 404 di body (HTTP 200) — harus jadi pending, bukan gagal.
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          status_code: "404",
+          status_message: "Transaction doesn't exist.",
+          order_id: "UD-MT-BELUM-DIBUKA",
+        }),
+      } as unknown as Response;
+    }
+    if (url.includes("/v2/UD-MT-404HTTP/status")) {
+      return {
+        ok: false,
+        status: 404,
+        json: async () => ({
+          status_code: "404",
+          status_message: "Transaction doesn't exist.",
+          order_id: "UD-MT-404HTTP",
+        }),
+      } as unknown as Response;
+    }
     throw new Error(`fetch tak terduga: ${url}`);
   }) as typeof fetch;
 
@@ -205,6 +229,17 @@ async function main(): Promise<void> {
   check(
     "status: ke api sandbox",
     fetchCalls[1].url.includes("api.sandbox.midtrans.com/v2/UD-MT-9/status"),
+  );
+  const notOpened = await getTransactionStatus("UD-MT-BELUM-DIBUKA");
+  check(
+    "status: Snap belum dibuka -> pending (bukan gagal)",
+    notOpened.transaction_status === "pending" &&
+      notOpened.status_code === "404",
+  );
+  const http404 = await getTransactionStatus("UD-MT-404HTTP");
+  check(
+    "status: HTTP 404 -> pending juga",
+    http404.transaction_status === "pending",
   );
 
   // ===== Ringkasan =====
