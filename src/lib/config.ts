@@ -28,6 +28,17 @@ export function telegramAdminIds(): number[] {
     .filter((n) => Number.isFinite(n) && n > 0);
 }
 
+/** ID chat channel komunitas (mis. "-1001234567890"). Kosong = fitur
+ *  channel (feed order + wajib join) nonaktif — bot jalan normal. */
+export function telegramChannelId(): string {
+  return (process.env.TELEGRAM_CHANNEL_ID ?? "").trim();
+}
+
+/** Link publik channel komunitas (mis. "https://t.me/unicodesdigital"). */
+export function telegramChannelUrl(): string {
+  return (process.env.TELEGRAM_CHANNEL_URL ?? "").trim();
+}
+
 /** Password admin /admin (null kalau belum diisi — halaman admin fail closed). */
 export function adminPassword(): string | null {
   return optional("ADMIN_PASSWORD") ?? null;

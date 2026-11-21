@@ -58,7 +58,7 @@ import {
 import { rupiah, t, type Strings } from "./i18n";
 import { cancelAwaiting, getSession, type CheckoutDraft } from "./session";
 import { getWebAppUrl } from "./menu-button";
-import { telegramAdminIds, telegramBotToken } from "../lib/config";
+import { telegramAdminIds, telegramBotToken, telegramChannelId, telegramChannelUrl } from "../lib/config";
 
 const ADMIN_USERNAME = "@Dimas0227";
 const QTY_PACKS = [1, 5, 10, 30];
@@ -157,11 +157,73 @@ async function answerCb(ctx: Context): Promise<void> {
   }
 }
 
+/** Wajib-join channel komunitas (Dim: sebelum pakai bot harus join dulu).
+ *  - Channel belum dikonfigurasi (TELEGRAM_CHANNEL_ID kosong) = gate mati,
+ *    bot jalan normal (fail open).
+ *  - Hasil cek di-cache 10 menit per user; tombol "Saya Sudah Join" cek ulang.
+ *  - API error = fail open (jangan blokir pembeli gara-gara gangguan API),
+ *    tapi log keras supaya misconfig ketahuan. */
+const CHANNEL_JOIN_CACHE_MS = 10 * 60 * 1000;
+const channelJoinCache = new Map<number, { joined: boolean; at: number }>();
+
+async function isChannelMember(
+  ctx: Context,
+  tgId: number,
+  force = false,
+): Promise<boolean> {
+  const channelId = telegramChannelId();
+  if (!channelId) return true;
+  if (!force) {
+    const cached = channelJoinCache.get(tgId);
+    if (cached && Date.now() - cached.at < CHANNEL_JOIN_CACHE_MS) {
+      return cached.joined;
+    }
+  }
+  let joined = true; // fail open saat API error
+  try {
+    const member = await ctx.api.getChatMember(channelId, tgId);
+    joined = ["creator", "administrator", "member"].includes(member.status);
+  } catch (err) {
+    console.error(
+      "[join-gate] getChatMember gagal (fail open):",
+      err instanceof Error ? err.message : String(err),
+    );
+  }
+  channelJoinCache.set(tgId, { joined, at: Date.now() });
+  return joined;
+}
+
+/** Layar wajib-join: tombol Gabung (link channel) + Saya Sudah Join (cek ulang). */
+async function showJoinScreen(ctx: Context, notYet = false): Promise<void> {
+  const id = uid(ctx);
+  if (id == null) return;
+  const s = sOf(id);
+  const url = telegramChannelUrl();
+  const kb = new InlineKeyboard();
+  if (url) kb.url(s.joinChannelButton, url).row();
+  kb.text(s.joinChannelCheckButton, "check_joined");
+  await render(
+    ctx,
+    notYet ? `${s.joinChannelText}\n\n${s.joinChannelNotYet}` : s.joinChannelText,
+    kb,
+  );
+}
+
+/** Gate: true = boleh lanjut; false = layar join sudah ditampilkan. */
+async function requireJoined(ctx: Context): Promise<boolean> {
+  const id = uid(ctx);
+  if (id == null) return false;
+  if (await isChannelMember(ctx, id)) return true;
+  await showJoinScreen(ctx);
+  return false;
+}
+
 // ---------------------------------------------------------------- menu ---
 
 async function showMenu(ctx: Context): Promise<void> {
   const id = uid(ctx);
   if (id == null) return;
+  if (!(await requireJoined(ctx))) return;
   const s = sOf(id);
   const stats = await getBuyerStats(`tg:${id}`);
   const text = s.welcome(
@@ -956,6 +1018,7 @@ export function createBot(): Bot {
   });
 
   bot.command("products", async (ctx) => {
+    if (!(await requireJoined(ctx))) return;
     await showCatalog(ctx);
   });
 
@@ -1098,13 +1161,26 @@ export function createBot(): Bot {
     await showMenu(ctx);
   });
 
+  bot.callbackQuery("check_joined", async (ctx) => {
+    await answerCb(ctx);
+    const id = uid(ctx);
+    if (id == null) return;
+    if (await isChannelMember(ctx, id, true)) {
+      await showMenu(ctx);
+    } else {
+      await showJoinScreen(ctx, true);
+    }
+  });
+
   bot.callbackQuery("cat", async (ctx) => {
     await answerCb(ctx);
+    if (!(await requireJoined(ctx))) return;
     await showCatalog(ctx);
   });
 
   bot.callbackQuery(/^cat:(.+)$/, async (ctx) => {
     await answerCb(ctx);
+    if (!(await requireJoined(ctx))) return;
     const cat = ctx.match[1] === "all" ? "Semua" : ctx.match[1];
     await showCatalog(ctx, cat);
   });
@@ -1162,6 +1238,7 @@ export function createBot(): Bot {
 
   bot.callbackQuery("pay_wallet", async (ctx) => {
     await answerCb(ctx);
+    if (!(await requireJoined(ctx))) return;
     await payWithWallet(ctx);
   });
 
@@ -1172,6 +1249,7 @@ export function createBot(): Bot {
 
   bot.callbackQuery("pay_qris", async (ctx) => {
     await answerCb(ctx);
+    if (!(await requireJoined(ctx))) return;
     await payWithQris(ctx);
   });
 

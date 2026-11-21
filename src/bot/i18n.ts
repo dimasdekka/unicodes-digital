@@ -83,6 +83,11 @@ export interface Strings {
   qrisCheckNoSession: string;
   qrisCheckFailed: string;
   qrisCheckTooSoon: string;
+  /** Wajib-join channel komunitas. */
+  joinChannelText: string;
+  joinChannelButton: string;
+  joinChannelCheckButton: string;
+  joinChannelNotYet: string;
   freeOrderDone: (orderId: string) => string;
   walletTitle: (balance: number, totalTopup: number, totalSpent: number) => string;
   topupTitle: string;
@@ -226,6 +231,12 @@ const id: Strings = {
     "⚠️ Sistem belum bisa mengecek pembayaran otomatis — sesi GoBiz belum login. Hubungi admin.",
   qrisCheckFailed: "❌ Gagal mengecek pembayaran. Coba lagi sebentar.",
   qrisCheckTooSoon: "⏳ Baru saja dicek — tunggu beberapa detik lagi.",
+  joinChannelText:
+    "🔒 <b>Gabung komunitas dulu ya!</b>\n\nSebelum belanja, join dulu channel komunitas Unicodes Digital — di sana ada info order terbaru, promo, dan pengumuman.\n\nTap tombol Gabung di bawah, lalu tap '✅ Saya Sudah Join'.",
+  joinChannelButton: "📢 Gabung Komunitas",
+  joinChannelCheckButton: "✅ Saya Sudah Join",
+  joinChannelNotYet:
+    "⏳ Belum terdeteksi — pastikan kamu sudah join channel-nya, lalu tap tombol ini lagi.",
   freeOrderDone: (orderId) =>
     `✅ Order ${orderId} gratis berkat promo — langsung diproses ke supplier…`,
   walletTitle: (balance, totalTopup, totalSpent) =>
@@ -402,6 +413,12 @@ const en: Strings = {
     "⚠️ The system can't check payments automatically yet — the GoBiz session isn't logged in. Contact the admin.",
   qrisCheckFailed: "❌ Couldn't check the payment. Try again in a moment.",
   qrisCheckTooSoon: "⏳ Just checked — wait a few more seconds.",
+  joinChannelText:
+    "🔒 <b>Join the community first!</b>\n\nBefore shopping, please join the Unicodes Digital community channel — the latest orders, promos, and announcements live there.\n\nTap Join below, then tap '✅ I've Joined'.",
+  joinChannelButton: "📢 Join Community",
+  joinChannelCheckButton: "✅ I've Joined",
+  joinChannelNotYet:
+    "⏳ Not detected yet — make sure you've joined the channel, then tap this button again.",
   freeOrderDone: (orderId) =>
     `✅ Order ${orderId} is free thanks to the promo — processing it right away…`,
   walletTitle: (balance, totalTopup, totalSpent) =>

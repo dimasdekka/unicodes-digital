@@ -63,6 +63,8 @@ const stubControl = {
     timeISO?: string;
     status?: string;
   }[],
+  // Status keanggotaan channel komunitas yang dikembalikan getChatMember.
+  channelMemberStatus: "left",
 };
 
 function fakeResponse(body: unknown): Response {
@@ -236,6 +238,16 @@ async function parseBody(init?: { body?: unknown }): Promise<Record<string, unkn
     if (method === "answerCallbackQuery") {
       calls.push({ method });
       return fakeResponse({ ok: true, result: true });
+    }
+    if (method === "getChatMember") {
+      calls.push({ method, chatId, data: body.user_id });
+      return fakeResponse({
+        ok: true,
+        result: {
+          status: stubControl.channelMemberStatus,
+          user: { id: body.user_id, is_bot: false, first_name: "Test" },
+        },
+      });
     }
     if (method === "forwardMessage") {
       calls.push({
@@ -1676,6 +1688,90 @@ async function main(): Promise<void> {
     lastText("sendMessage").includes("kedaluwarsa"),
     lastText("sendMessage").slice(0, 150),
   );
+
+  // ================= S33: wajib-join channel + feed NEW ORDER =================
+  const { notifyChannelOrder } = await import("../lib/notify");
+  process.env.TELEGRAM_CHANNEL_ID = "-100999";
+  process.env.TELEGRAM_CHANNEL_URL = "https://t.me/unicodesdigital";
+  // (a) Belum join -> /start menampilkan layar join (bukan menu).
+  stubControl.channelMemberStatus = "left";
+  err = await send(textUpdate(buyer, "/start"));
+  check(
+    "wajib-join: belum join -> layar join, bukan menu",
+    lastText("sendMessage").includes("Gabung komunitas") &&
+      !lastText("sendMessage").includes("Welcome to Unicodes Digital"),
+    lastText("sendMessage").slice(0, 150),
+  );
+  check(
+    "wajib-join: tombol Gabung + Saya Sudah Join ada",
+    kbText(lastCall("sendMessage")).includes("Gabung Komunitas") &&
+      kbText(lastCall("sendMessage")).includes("check_joined"),
+    kbText(lastCall("sendMessage")).slice(0, 200),
+  );
+  // (b) Tap cek saat belum join -> tetap layar join + "Belum terdeteksi".
+  // (render() mengedit pesan callback, jadi teksnya di editMessageText.)
+  err = await send(cbUpdate(buyer, "check_joined"));
+  check(
+    "wajib-join: cek saat belum join -> belum terdeteksi",
+    lastText("editMessageText").includes("Belum terdeteksi"),
+    lastText("editMessageText").slice(0, 150),
+  );
+  // (c) Sudah join -> tap cek -> menu muncul.
+  stubControl.channelMemberStatus = "member";
+  err = await send(cbUpdate(buyer, "check_joined"));
+  check(
+    "wajib-join: sudah join -> menu muncul",
+    err === null && lastText().includes("Welcome to Unicodes Digital"),
+    lastText().slice(0, 150),
+  );
+  // (d) Feed channel: order delivered diposting sekali, tersamar, tanpa isi hasil.
+  const fakeOrder = {
+    id: "UD-TEST123456",
+    catalogProductId: "muse-token-1b",
+    quantity: 5,
+    retailTotalIdr: 7500,
+    status: "delivered",
+    supplier: "sondev",
+    supplierOrderId: "SONDEV-1",
+    deliveredItems: ["https://muse.ai/invite/SECRET123"],
+    resultLink: "https://muse.ai/invite/SECRET123",
+    error: null,
+    buyerRef: "tg:111",
+    discountIdr: 0,
+    createdAt: new Date().toISOString(),
+    paidVia: "qris",
+  } as unknown as Parameters<typeof notifyChannelOrder>[0];
+  const channelBefore = calls.filter(
+    (c) => c.method === "sendMessage" && c.chatId === -100999,
+  ).length;
+  const posted = await notifyChannelOrder(fakeOrder);
+  const channelCall = calls.find(
+    (c) => c.method === "sendMessage" && c.chatId === -100999,
+  );
+  check(
+    "channel: order delivered diposting ke channel",
+    posted === true && !!channelCall,
+    `posted=${posted}`,
+  );
+  check(
+    "channel: isi NEW ORDER + buyer tersamar + tanpa kode hasil",
+    (channelCall?.text ?? "").includes("NEW ORDER") &&
+      (channelCall?.text ?? "").includes("bu••••") &&
+      !(channelCall?.text ?? "").includes("@budi") &&
+      !(channelCall?.text ?? "").includes("SECRET123") &&
+      !(channelCall?.text ?? "").includes("muse.ai/invite") &&
+      (channelCall?.text ?? "").includes("UD-T••••3456"),
+    (channelCall?.text ?? "").slice(0, 300),
+  );
+  // (e) Diposting ulang -> dedupe (tetap 1 postingan).
+  await notifyChannelOrder(fakeOrder);
+  check(
+    "channel: posting kedua order sama ditolak (dedupe)",
+    calls.filter((c) => c.method === "sendMessage" && c.chatId === -100999)
+      .length === channelBefore + 1,
+  );
+  delete process.env.TELEGRAM_CHANNEL_ID;
+  delete process.env.TELEGRAM_CHANNEL_URL;
 
   // ---- ringkasan ----
   const failed = results.filter((r) => !r.ok);

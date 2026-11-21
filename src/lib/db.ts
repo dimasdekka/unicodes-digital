@@ -143,6 +143,12 @@ function openDb(): DatabaseSync {
       value TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+    -- Order yang sudah diposting ke channel komunitas (dedupe: satu order
+    -- diposting SEKALI, walau notifyBuyer dipanggil berulang).
+    CREATE TABLE IF NOT EXISTS channel_posts (
+      order_id TEXT PRIMARY KEY,
+      posted_at TEXT NOT NULL
+    );
   `);
   // Migrasi ringan: tambah kolom target kalau belum ada (order lama tetap jalan).
   const cols = db

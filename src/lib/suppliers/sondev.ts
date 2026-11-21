@@ -4,7 +4,8 @@
 // Auth: API key + HMAC-SHA256. Setiap request kirim:
 //   X-API-KEY, X-TIMESTAMP (detik Unix, ±300 detik dari jam server),
 //   X-SIGNATURE = hex HMAC-SHA256(secret, timestamp + "\n" + METHOD + "\n" + path + "\n" + body)
-//   - path = path saja, TANPA query string (query tidak ikut signature!)
+//   - path = path LENGKAP termasuk "/api/v1" (mis. "/api/v1/profile"),
+//     TANPA query string (query tidak ikut signature!)
 //   - body JSON harus compact tanpa spasi (JSON.stringify sudah compact)
 //   - body kosong untuk GET/DELETE
 // Secret didapat dari bot Telegram Sondev (/reseller -> "Reveal Secret"), cuma tampil SEKALI.
@@ -31,6 +32,17 @@ import type {
 import { sondevBaseUrl, sondevConfig } from "../config";
 
 const BASE_URL = sondevBaseUrl();
+// Path dasar dari base URL (mis. "/api/v1") — server menandatangani path
+// LENGKAP ini ("/api/v1/profile"), bukan path relatif ("/profile").
+// Bukti: pesan error server + template resmi (endpoint "/api/v1/orders/create"
+// yang ditandatangani utuh). Dulu adapter menandatangani path relatif saja
+// -> semua endpoint signed ditolak INVALID_SIGNATURE (ditemukan 2026-11-21).
+let BASE_PATH = "";
+try {
+  BASE_PATH = new URL(BASE_URL).pathname.replace(/\/$/, "");
+} catch {
+  BASE_PATH = "";
+}
 
 function credentials(): { key: string; secret: string } {
   const { apiKey, apiSecret } = sondevConfig();
@@ -58,8 +70,10 @@ async function call<T>(pathWithQuery: string, init?: RequestInit): Promise<T> {
   const { key, secret } = credentials();
   const method = (init?.method ?? "GET").toUpperCase();
   const body = typeof init?.body === "string" ? init.body : "";
-  // PENTING (docs): yang ditandatangani hanya PATH, tanpa query string.
-  const [signPath] = pathWithQuery.split("?");
+  // PENTING (docs + template resmi): yang ditandatangani adalah path
+  // LENGKAP ("/api/v1/..."), TANPA query string (query tidak ikut signature).
+  const [signPathRel] = pathWithQuery.split("?");
+  const signPath = `${BASE_PATH}${signPathRel}`;
   const maxAttempts = 4;
   let lastError: Error | null = null;
 
