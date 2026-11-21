@@ -58,7 +58,13 @@ import {
 import { rupiah, t, type Strings } from "./i18n";
 import { cancelAwaiting, getSession, type CheckoutDraft } from "./session";
 import { getWebAppUrl } from "./menu-button";
-import { telegramAdminIds, telegramBotToken, telegramChannelId, telegramChannelUrl } from "../lib/config";
+import { telegramAdminIds, telegramBotToken, telegramChannelId, telegramChannelUrl, midtransConfigured } from "../lib/config";
+import {
+  createMidtransPayment,
+  createSnapTransaction,
+  getMidtransPayment,
+} from "../lib/payments/midtrans";
+import { tickMidtransPayments } from "../lib/payments/midtrans-poller";
 
 const ADMIN_USERNAME = "@Dimas0227";
 const QTY_PACKS = [1, 5, 10, 30];
@@ -372,7 +378,7 @@ async function showPay(ctx: Context, draft: CheckoutDraft, notice?: string): Pro
     kb.text("✅ Proses Order (Gratis)", "pay_wallet").row();
   } else {
     kb.text(s.payWallet, "pay_wallet").row();
-    kb.text(s.payQris, "pay_qris").row();
+    kb.text(s.payMidtrans, "pay_midtrans").row();
   }
   kb.text("🎟️ Pakai Promo", "promo_enter").row();
   kb.text("❌ Batal", "cancel_checkout").text(s.backMenu, "menu");
@@ -653,6 +659,109 @@ async function checkQrisPayment(ctx: Context, reference: string): Promise<void> 
   await ctx.reply(s.qrisCheckFailed, { parse_mode: "HTML", reply_markup: checkKb });
 }
 
+/** Cek manual pembayaran Midtrans (tombol "Saya Sudah Bayar" di pesan link
+ *  bayar) — jalankan satu tick poller Midtrans sekarang, lalu laporkan
+ *  status referensi itu. Cerminan checkQrisPayment untuk jalur Midtrans. */
+async function checkMidtransPayment(ctx: Context, reference: string): Promise<void> {
+  const id = uid(ctx);
+  if (id == null) return;
+  const s = sOf(id);
+  const checkKb = new InlineKeyboard()
+    .text(s.qrisCheckButton, `midtrans_check:${reference}`)
+    .row()
+    .text(s.backMenu, "menu");
+  const now = Date.now();
+  const last = lastManualQrisCheck.get(reference) ?? 0;
+  if (now - last < MANUAL_QRIS_CHECK_MIN_MS) {
+    await ctx.reply(s.qrisCheckTooSoon, {
+      parse_mode: "HTML",
+      reply_markup: checkKb,
+    });
+    return;
+  }
+  lastManualQrisCheck.set(reference, now);
+  if (!midtransConfigured()) {
+    await ctx.reply(s.midtransCheckNoConfig, {
+      parse_mode: "HTML",
+      reply_markup: checkKb,
+    });
+    return;
+  }
+  const tick = await tickMidtransPayments();
+  if (!tick.ok) {
+    await ctx.reply(s.qrisCheckFailed, {
+      parse_mode: "HTML",
+      reply_markup: checkKb,
+    });
+    return;
+  }
+  const payment = getMidtransPayment(reference);
+  if (reference.startsWith("UD-")) {
+    const order = await getStoreOrder(reference);
+    if (!order) {
+      await ctx.reply(s.qrisCheckFailed, { parse_mode: "HTML", reply_markup: checkKb });
+      return;
+    }
+    if (
+      order.status === "paid" ||
+      order.status === "processing" ||
+      order.status === "delivered"
+    ) {
+      await ctx.reply(s.qrisCheckFoundOrder(order.id), {
+        parse_mode: "HTML",
+        reply_markup: backRow(langOf(id)),
+      });
+      return;
+    }
+    if (
+      payment?.status === "expired" ||
+      (order.status === "failed" && (order.error ?? "").includes("kedaluwarsa"))
+    ) {
+      await ctx.reply(s.qrisCheckExpired, {
+        parse_mode: "HTML",
+        reply_markup: backRow(langOf(id)),
+      });
+      return;
+    }
+    await ctx.reply(s.qrisCheckPending, {
+      parse_mode: "HTML",
+      reply_markup: checkKb,
+    });
+    return;
+  }
+  if (reference.startsWith("TOPUP-")) {
+    const topup = getTopup(reference);
+    if (!topup) {
+      await ctx.reply(s.qrisCheckFailed, { parse_mode: "HTML", reply_markup: checkKb });
+      return;
+    }
+    if (topup.status === "paid") {
+      await ctx.reply(s.qrisCheckFoundTopup(topup.amountIdr), {
+        parse_mode: "HTML",
+        reply_markup: backRow(langOf(id)),
+      });
+      return;
+    }
+    if (payment?.status === "expired") {
+      await ctx.reply(s.qrisCheckExpired, {
+        parse_mode: "HTML",
+        reply_markup: backRow(langOf(id)),
+      });
+      return;
+    }
+    await ctx.reply(s.qrisCheckPending, {
+      parse_mode: "HTML",
+      reply_markup: checkKb,
+    });
+    return;
+  }
+  await ctx.reply(s.qrisCheckFailed, { parse_mode: "HTML", reply_markup: checkKb });
+}
+
+/** Bayar order via QRIS dinamis GoBiz (jalur LAMA).
+ *  TIDAK ditawarkan di menu sejak Midtrans jadi jalur aktif (2026-11-21);
+ *  dipertahankan sebagai fallback + dipakai tes QRIS. Tombolnya (pay_qris)
+ *  masih terdaftar tapi tidak muncul di layar bayar. */
 async function payWithQris(ctx: Context): Promise<void> {
   const id = uid(ctx);
   if (id == null) return;
@@ -725,6 +834,100 @@ async function payWithQris(ctx: Context): Promise<void> {
   }
 }
 
+/** Bayar order via Midtrans Snap (QRIS) — jalur pembayaran aktif.
+ *  Kalau order ini sudah punya link Midtrans pending yang belum kedaluwarsa,
+ *  pakai lagi link itu (jangan buat transaksi baru dengan order_id sama). */
+async function payWithMidtrans(ctx: Context): Promise<void> {
+  const id = uid(ctx);
+  if (id == null) return;
+  const s = sOf(id);
+  const session = getSession(id);
+  const draft = session.draft;
+  if (!draft) {
+    await showCatalog(ctx);
+    return;
+  }
+  const ensured = await ensureDraftOrder(ctx, draft);
+  if ("error" in ensured) {
+    await showPay(ctx, draft, `⚠️ ${ensured.error}`);
+    return;
+  }
+  const order = ensured.order;
+  if (order.status !== "awaiting_payment") {
+    await render(ctx, s.orderDetail({
+      id: order.id,
+      product: order.catalogProductId,
+      qty: order.quantity,
+      total: order.retailTotalIdr,
+      status: s.statusLabel(order.status),
+      items: order.deliveredItems,
+      link: order.resultLink,
+      error: order.error,
+    }), backRow(langOf(id)));
+    return;
+  }
+  await setOrderPaidVia(order.id, "midtrans");
+  if (order.retailTotalIdr === 0) {
+    // Gratis berkat promo — tanpa bayar.
+    await markPaid(order.id);
+    try {
+      maybeRewardReferrer(id);
+    } catch (err) {
+      console.error("[bot] reward referral gagal:", err);
+    }
+    session.draft = undefined;
+    session.awaiting = undefined;
+    await render(ctx, s.freeOrderDone(order.id), backRow(langOf(id)));
+    fulfillInBackground(order.id);
+    return;
+  }
+  try {
+    const existing = getMidtransPayment(order.id);
+    let redirectUrl = existing?.redirect_url;
+    let expiresAt = existing?.expires_at;
+    if (
+      !existing ||
+      existing.status !== "pending" ||
+      new Date(existing.expires_at).getTime() <= Date.now()
+    ) {
+      const product = getCatalogProduct(order.catalogProductId);
+      const snap = await createSnapTransaction({
+        orderId: order.id,
+        amountIdr: order.retailTotalIdr,
+        itemName: product.name,
+      });
+      const payment = createMidtransPayment({
+        orderId: order.id,
+        amountIdr: order.retailTotalIdr,
+        snapToken: snap.token,
+        redirectUrl: snap.redirectUrl,
+      });
+      redirectUrl = payment.redirect_url;
+      expiresAt = payment.expires_at;
+    }
+    session.draft = undefined;
+    session.awaiting = undefined;
+    const kb = new InlineKeyboard()
+      .url(s.midtransOpenButton, redirectUrl ?? "")
+      .row()
+      .text(s.qrisCheckButton, `midtrans_check:${order.id}`)
+      .row()
+      .text(s.backMenu, "menu");
+    await render(
+      ctx,
+      s.midtransLink(order.id, order.retailTotalIdr, expiresAt ?? ""),
+      kb,
+    );
+  } catch (err) {
+    console.error("[bot] Midtrans gagal:", err);
+    await render(
+      ctx,
+      s.midtransFailed(err instanceof Error ? err.message : undefined),
+      backRow(langOf(id)),
+    );
+  }
+}
+
 // -------------------------------------------------------------- wallet ---
 
 async function showWallet(ctx: Context): Promise<void> {
@@ -767,24 +970,35 @@ async function startTopup(ctx: Context, amountIdr: number): Promise<void> {
   const s = sOf(id);
   try {
     const topup = createTopup(id, amountIdr);
-    const staticPayload = getGopayStaticQris();
-    if (!staticPayload) {
-      throw new Error("QRIS statis belum dipasang di panel admin (/admin).");
-    }
-    const { payment, qrString } = createQrisPayment({
-      reference: topup.id,
+    const snap = await createSnapTransaction({
+      orderId: topup.id,
       amountIdr: topup.amountIdr,
-      staticPayload,
+      itemName: `Isi saldo Unicodes Digital ${rupiah(topup.amountIdr)}`,
     });
-    await sendQrisPhoto(
+    const payment = createMidtransPayment({
+      orderId: topup.id,
+      amountIdr: topup.amountIdr,
+      snapToken: snap.token,
+      redirectUrl: snap.redirectUrl,
+    });
+    const kb = new InlineKeyboard()
+      .url(s.midtransOpenButton, snap.redirectUrl)
+      .row()
+      .text(s.qrisCheckButton, `midtrans_check:${topup.id}`)
+      .row()
+      .text(s.backMenu, "menu");
+    await render(
       ctx,
-      qrString,
-      s.topupCreated(topup.amountIdr, payment.unique_amount_idr, payment.expires_at),
-      topup.id,
+      s.midtransTopupCreated(topup.amountIdr, payment.expires_at),
+      kb,
     );
   } catch (err) {
-    console.error("[bot] top-up gagal:", err);
-    await render(ctx, s.topupFailed, backRow(langOf(id)));
+    console.error("[bot] top-up Midtrans gagal:", err);
+    await render(
+      ctx,
+      s.midtransFailed(err instanceof Error ? err.message : undefined),
+      backRow(langOf(id)),
+    );
   }
 }
 
@@ -1247,10 +1461,21 @@ export function createBot(): Bot {
     await checkQrisPayment(ctx, ctx.match[1]);
   });
 
+  bot.callbackQuery(/^midtrans_check:(.+)$/, async (ctx) => {
+    await answerCb(ctx);
+    await checkMidtransPayment(ctx, ctx.match[1]);
+  });
+
   bot.callbackQuery("pay_qris", async (ctx) => {
     await answerCb(ctx);
     if (!(await requireJoined(ctx))) return;
     await payWithQris(ctx);
+  });
+
+  bot.callbackQuery("pay_midtrans", async (ctx) => {
+    await answerCb(ctx);
+    if (!(await requireJoined(ctx))) return;
+    await payWithMidtrans(ctx);
   });
 
   bot.callbackQuery("cancel_checkout", async (ctx) => {

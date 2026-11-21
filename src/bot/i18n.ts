@@ -88,6 +88,13 @@ export interface Strings {
   joinChannelButton: string;
   joinChannelCheckButton: string;
   joinChannelNotYet: string;
+  /** Pembayaran Midtrans Snap. */
+  payMidtrans: string;
+  midtransOpenButton: string;
+  midtransLink: (orderId: string, total: number, expiresAt: string) => string;
+  midtransTopupCreated: (amount: number, expiresAt: string) => string;
+  midtransFailed: (reason?: string) => string;
+  midtransCheckNoConfig: string;
   freeOrderDone: (orderId: string) => string;
   walletTitle: (balance: number, totalTopup: number, totalSpent: number) => string;
   topupTitle: string;
@@ -237,6 +244,16 @@ const id: Strings = {
   joinChannelCheckButton: "✅ Saya Sudah Join",
   joinChannelNotYet:
     "⏳ Belum terdeteksi — pastikan kamu sudah join channel-nya, lalu tap tombol ini lagi.",
+  payMidtrans: "💳 Bayar via Midtrans",
+  midtransOpenButton: "💳 Buka Pembayaran",
+  midtransLink: (orderId, total, expiresAt) =>
+    `💳 <b>Pembayaran Midtrans</b>\n\nOrder: <code>${orderId}</code>\nTotal: <b>${rupiah(total)}</b>\n\nTap tombol di bawah untuk bayar (QRIS) — link berlaku sampai ${wibTime(expiresAt)} WIB (30 menit).\n\nSetelah bayar, tap '✅ Saya Sudah Bayar' atau tunggu dicek otomatis.`,
+  midtransTopupCreated: (amount, expiresAt) =>
+    `💳 <b>Isi saldo ${rupiah(amount)}</b>\n\nTap tombol di bawah untuk bayar (QRIS) — link berlaku sampai ${wibTime(expiresAt)} WIB (30 menit).\n\nSaldo masuk otomatis setelah pembayaran lunas.`,
+  midtransFailed: (reason) =>
+    `❌ Pembayaran Midtrans belum bisa dibuat sekarang.${reason ? `\nAlasan: ${reason}` : ""}\n\nCoba lagi nanti atau hubungi admin.`,
+  midtransCheckNoConfig:
+    "⚠️ Pembayaran Midtrans belum dikonfigurasi — hubungi admin.",
   freeOrderDone: (orderId) =>
     `✅ Order ${orderId} gratis berkat promo — langsung diproses ke supplier…`,
   walletTitle: (balance, totalTopup, totalSpent) =>
@@ -419,6 +436,16 @@ const en: Strings = {
   joinChannelCheckButton: "✅ I've Joined",
   joinChannelNotYet:
     "⏳ Not detected yet — make sure you've joined the channel, then tap this button again.",
+  payMidtrans: "💳 Pay via Midtrans",
+  midtransOpenButton: "💳 Open Payment",
+  midtransLink: (orderId, total, expiresAt) =>
+    `💳 <b>Midtrans Payment</b>\n\nOrder: <code>${orderId}</code>\nTotal: <b>${rupiah(total)}</b>\n\nTap the button below to pay (QRIS) — link valid until ${wibTime(expiresAt)} WIB (30 minutes).\n\nAfter paying, tap '✅ I've Paid' or wait for the automatic check.`,
+  midtransTopupCreated: (amount, expiresAt) =>
+    `💳 <b>Top up ${rupiah(amount)}</b>\n\nTap the button below to pay (QRIS) — link valid until ${wibTime(expiresAt)} WIB (30 minutes).\n\nBalance is credited automatically once the payment clears.`,
+  midtransFailed: (reason) =>
+    `❌ Midtrans payment couldn't be created right now.${reason ? `\nReason: ${reason}` : ""}\n\nTry again later or contact support.`,
+  midtransCheckNoConfig:
+    "⚠️ Midtrans payments aren't configured yet — contact the admin.",
   freeOrderDone: (orderId) =>
     `✅ Order ${orderId} is free thanks to the promo — processing it right away…`,
   walletTitle: (balance, totalTopup, totalSpent) =>

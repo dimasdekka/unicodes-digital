@@ -39,6 +39,27 @@ export function telegramChannelUrl(): string {
   return (process.env.TELEGRAM_CHANNEL_URL ?? "").trim();
 }
 
+/** Server Key Midtrans (Basic auth API). Wajib untuk transaksi + cek status. */
+export function midtransServerKey(): string {
+  return required("MIDTRANS_SERVER_KEY");
+}
+
+/** Client Key Midtrans (untuk Snap.js — saat ini tidak dipakai, kami pakai
+ *  redirect_url). */
+export function midtransClientKey(): string {
+  return required("MIDTRANS_CLIENT_KEY");
+}
+
+/** true = production, false/absen = sandbox. */
+export function midtransIsProduction(): boolean {
+  return (process.env.MIDTRANS_IS_PRODUCTION ?? "").trim() === "true";
+}
+
+/** Apakah Midtrans terkonfigurasi (server key terisi)? */
+export function midtransConfigured(): boolean {
+  return (process.env.MIDTRANS_SERVER_KEY ?? "").trim().length > 0;
+}
+
 /** Password admin /admin (null kalau belum diisi — halaman admin fail closed). */
 export function adminPassword(): string | null {
   return optional("ADMIN_PASSWORD") ?? null;

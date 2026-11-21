@@ -24,8 +24,8 @@ export function BuyButton({
   const [error, setError] = useState<string | null>(null);
   const [target, setTarget] = useState("");
   const [payment, setPayment] = useState<{
-    qrPngBase64: string;
-    uniqueAmountIdr: number;
+    redirectUrl: string;
+    snapToken: string;
     expiresAt: string;
     orderId: string;
   } | null>(null);
@@ -115,8 +115,8 @@ export function BuyButton({
         error?: string;
         order?: { id: string; status: string };
         payment?: {
-          qrPngBase64: string;
-          uniqueAmountIdr: number;
+          redirectUrl: string;
+          snapToken: string;
           expiresAt: string;
           reference: string;
         } | null;
@@ -131,8 +131,8 @@ export function BuyButton({
         return;
       }
       setPayment({
-        qrPngBase64: data.payment.qrPngBase64,
-        uniqueAmountIdr: data.payment.uniqueAmountIdr,
+        redirectUrl: data.payment.redirectUrl,
+        snapToken: data.payment.snapToken,
         expiresAt: data.payment.expiresAt,
         orderId: data.order.id,
       });
@@ -167,16 +167,25 @@ export function BuyButton({
       )}
       {payment ? (
         <div style={{ textAlign: "center" }}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={`data:image/png;base64,${payment.qrPngBase64}`}
-            alt="QRIS pembayaran"
-            style={{ width: "100%", maxWidth: 360, borderRadius: 12 }}
-          />
+          <a
+            href={payment.redirectUrl}
+            target="_blank"
+            rel="noreferrer"
+            style={{
+              display: "block",
+              padding: 12,
+              borderRadius: 8,
+              background: "linear-gradient(90deg, #7c3aed, #a855f7)",
+              color: "#fff",
+              textDecoration: "none",
+              fontWeight: 600,
+            }}
+          >
+            💳 Buka Pembayaran (QRIS)
+          </a>
           <p style={{ fontSize: 14, margin: "8px 0 0" }}>
-            Scan QR di atas — nominal{" "}
-            <strong>{rupiah(payment.uniqueAmountIdr)}</strong> (harus pas).
-            Berlaku sampai {wibTime(payment.expiresAt)} WIB.
+            Tap tombol di atas untuk bayar — link berlaku sampai {wibTime(payment.expiresAt)} WIB
+            (30 menit).
           </p>
           <p style={{ fontSize: 13, color: "#b3a1e6", margin: "6px 0 0" }}>
             {orderStatus === "awaiting_payment" &&

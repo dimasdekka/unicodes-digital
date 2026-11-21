@@ -54,6 +54,14 @@ export async function tickQrisPayments(
   client: GopayClient = gopayClient,
 ): Promise<QrisPollResult> {
   const now = new Date();
+  // Tidak ada yang menunggu + tidak ada yang kedaluwarsa = jangan panggil
+  // feed sama sekali (diam — bukan error; sejak Midtrans jadi jalur bayar
+  // aktif, ini jalur yang paling sering terjadi).
+  const pendingNow = listPendingQrisPayments(now);
+  const expiredNow = listExpiredPendingQrisPayments(now);
+  if (pendingNow.length === 0 && expiredNow.length === 0) {
+    return { ok: true, checked: 0, matched: 0, expired: 0 };
+  }
   let feed: Awaited<ReturnType<GopayClient["listFeedTransactions"]>>;
   try {
     feed = await client.listFeedTransactions();

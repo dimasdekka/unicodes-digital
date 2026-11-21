@@ -149,6 +149,19 @@ function openDb(): DatabaseSync {
       order_id TEXT PRIMARY KEY,
       posted_at TEXT NOT NULL
     );
+    -- Pembayaran Midtrans (Snap): satu baris per order/top-up.
+    -- order_id = id order (UD-…) atau id top-up (TOPUP-…) — sama dengan
+    -- order_id transaksi Midtrans (dipakai cek status + webhook).
+    CREATE TABLE IF NOT EXISTS midtrans_payments (
+      order_id TEXT PRIMARY KEY,
+      amount_idr INTEGER NOT NULL,
+      snap_token TEXT NOT NULL,
+      redirect_url TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL,
+      expires_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_midtrans_payments_status ON midtrans_payments(status, expires_at);
   `);
   // Migrasi ringan: tambah kolom target kalau belum ada (order lama tetap jalan).
   const cols = db

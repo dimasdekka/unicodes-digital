@@ -18,6 +18,8 @@ process.env.ADMIN_PASSWORD = "test-admin-pw";
 process.env.SONDEV_API_KEY = "test-sondev-key";
 process.env.SONDEV_API_SECRET = "test-sondev-secret";
 process.env.LAHASTORE_API_KEY = "test-laha-key";
+// Key Midtrans SINTETIS (bukan key asli) — dipakai semua tes jalur Midtrans.
+process.env.MIDTRANS_SERVER_KEY = "TEST-SERVER-KEY";
 
 // QRIS statis sintetis (speks EMVCo, BUKAN merchant asli) — dibuat di main()
 // dari serializeQrisPayload, lalu disimpan ke settings + dipakai mock GoBiz.
@@ -65,6 +67,8 @@ const stubControl = {
   }[],
   // Status keanggotaan channel komunitas yang dikembalikan getChatMember.
   channelMemberStatus: "left",
+  // Status transaksi yang dikembalikan endpoint status Midtrans.
+  midtransStatus: "pending",
 };
 
 function fakeResponse(body: unknown): Response {
@@ -371,6 +375,23 @@ async function parseBody(init?: { body?: unknown }): Promise<Record<string, unkn
       data: { balance_idr: stubControl.sondevBalanceIdr, balance_usdt: 0 },
     });
   }
+  // ---- Midtrans Snap: buat transaksi + cek status (sandbox) ----
+  if (url.includes("midtrans.com/snap/v1/transactions")) {
+    return fakeResponse({
+      token: "SNAP-HARNESS",
+      redirect_url:
+        "https://app.sandbox.midtrans.com/snap/v1/redirection/harness",
+    });
+  }
+  if (/midtrans\.com\/v2\/.+\/status$/.test(url)) {
+    return fakeResponse({
+      transaction_status: stubControl.midtransStatus,
+      status_code: "200",
+      gross_amount: "1500",
+      payment_type: "qris",
+      order_id: "harness",
+    });
+  }
   throw new Error(`HARNESS: fetch tak terduga: ${url}`);
 }) as typeof fetch;
 
@@ -393,6 +414,9 @@ async function main(): Promise<void> {
   const { setGopayStaticQris } = await import("../lib/payments/qris-settings");
   const { gopayClient } = await import("../lib/payments/gopay");
   const { tickQrisPayments } = await import("../lib/payments/qris-poller");
+  const { tickMidtransPayments } = await import("../lib/payments/midtrans-poller");
+  const { getMidtransPayment, createMidtransPayment } = await import("../lib/payments/midtrans");
+  const { createTopup } = await import("../lib/wallet");
 
   // QRIS statis sintetis (speks EMVCo — CRC dihitung serializeQrisPayload).
   TEST_STATIC_QRIS = serializeQrisPayload([
@@ -624,35 +648,31 @@ async function main(): Promise<void> {
   );
   err = await send(cbUpdate(buyer, "topup:25000"));
   check("buat top-up tidak throw", err === null, err ?? undefined);
-  const topupPhoto = lastCall("sendPhoto");
+  const topupMsg = lastText("editMessageText");
   check(
-    "top-up kirim foto QR (kartu standee) + caption nominal unik",
-    (topupPhoto?.text ?? "").includes("Rp25.001") &&
-      (topupPhoto?.text ?? "").includes("Isi saldo"),
-    JSON.stringify({ caption: topupPhoto?.text?.slice(0, 150) }),
+    "top-up kirim link bayar Midtrans + nominal",
+    topupMsg.includes("Isi saldo Rp25.000") &&
+      kbText(lastCall("editMessageText")).includes("Buka Pembayaran"),
+    topupMsg.slice(0, 150),
   );
   const topupRow = getDb()
     .prepare("SELECT id FROM wallet_topups WHERE tg_id = ? ORDER BY created_at DESC LIMIT 1")
     .get(111) as { id: string } | undefined;
   check("baris top-up tersimpan", !!topupRow?.id);
-  const topupQrisRow = topupRow
-    ? (getDb()
-        .prepare("SELECT unique_amount_idr FROM qris_payments WHERE reference = ?")
-        .get(topupRow.id) as { unique_amount_idr: number } | undefined)
-    : undefined;
+  const topupMtRow = topupRow ? getMidtransPayment(topupRow.id) : undefined;
   check(
-    "pembayaran QRIS top-up tersimpan (nominal unik 25001)",
-    topupQrisRow?.unique_amount_idr === 25001,
-    `unique=${topupQrisRow?.unique_amount_idr}`,
+    "pembayaran Midtrans top-up tersimpan (Rp25.000, pending)",
+    topupMtRow?.amount_idr === 25000 && topupMtRow?.status === "pending",
+    `amount=${topupMtRow?.amount_idr} status=${topupMtRow?.status}`,
   );
 
-  // ================= S6: feed GoBiz -> top-up lunas (idempotent) =================
-  stubControl.feedTransactions = [{ id: "TX-TOPUP-25001", amountIdr: 25001 }];
-  const tickTopup = await tickQrisPayments();
+  // ================= S6: status Midtrans -> top-up lunas (idempotent) =================
+  stubControl.midtransStatus = "settlement";
+  const tickTopup = await tickMidtransPayments();
   check("tick poller top-up ok", tickTopup.ok === true, tickTopup.error);
   check("tick poller top-up match 1", tickTopup.matched === 1, JSON.stringify(tickTopup));
   check("saldo jadi Rp25.000", getWallet(111).balanceIdr === 25000);
-  const tickTopup2 = await tickQrisPayments();
+  const tickTopup2 = await tickMidtransPayments();
   check(
     "tick duplikat idempotent (tetap 25.000, match 0)",
     getWallet(111).balanceIdr === 25000 && tickTopup2.matched === 0,
@@ -1072,30 +1092,28 @@ async function main(): Promise<void> {
       lastText("editMessageText").includes("Isi saldo"),
     lastText("editMessageText").slice(0, 200),
   );
-  // Bayar via QRIS -> foto QR (kartu standee) dengan nominal unik, tanpa charge beneran.
-  err = await send(cbUpdate(buyer, "pay_qris"));
-  const qrisPhoto = lastCall("sendPhoto");
+  // Bayar via Midtrans -> link bayar (QRIS di halaman Midtrans), tanpa charge beneran.
+  err = await send(cbUpdate(buyer, "pay_midtrans"));
+  const mtPayText = lastText("editMessageText");
   check(
-    "bayar QRIS mengirim foto QR + nominal unik 10501",
+    "bayar Midtrans mengirim link bayar + total Rp10.500",
     err === null &&
-      (qrisPhoto?.text ?? "").includes("Rp10.501") &&
-      (qrisPhoto?.text ?? "").includes("Order"),
-    JSON.stringify({ caption: qrisPhoto?.text?.slice(0, 200) }),
+      mtPayText.includes("Pembayaran Midtrans") &&
+      mtPayText.includes("Rp10.500"),
+    mtPayText.slice(0, 200),
   );
   const awaitingOrder = getDb()
     .prepare(
       "SELECT id FROM store_orders WHERE buyer_ref = 'tg:111' AND status = 'awaiting_payment' ORDER BY created_at DESC LIMIT 1",
     )
     .get() as { id: string } | undefined;
-  const qrisOrderRow = awaitingOrder
-    ? (getDb()
-        .prepare("SELECT unique_amount_idr FROM qris_payments WHERE reference = ?")
-        .get(awaitingOrder.id) as { unique_amount_idr: number } | undefined)
+  const mtOrderRow = awaitingOrder
+    ? getMidtransPayment(awaitingOrder.id)
     : undefined;
   check(
-    "pembayaran QRIS order tersimpan (nominal unik 10501)",
-    qrisOrderRow?.unique_amount_idr === 10501,
-    `unique=${qrisOrderRow?.unique_amount_idr}`,
+    "pembayaran Midtrans order tersimpan (Rp10.500, pending)",
+    mtOrderRow?.amount_idr === 10500 && mtOrderRow?.status === "pending",
+    `amount=${mtOrderRow?.amount_idr} status=${mtOrderRow?.status}`,
   );
 
   // ================= S21: top-up custom =================
@@ -1115,12 +1133,12 @@ async function main(): Promise<void> {
   );
   err = await send(textUpdate(buyer, "20000"));
   check(
-    "top-up custom 20000 diterima (foto QR, nominal unik 20001)",
-    // startTopup dipanggil dari handler pesan teks -> sendQrisPhoto mengirim
-    // sendPhoto baru (bukan editMessageText seperti dari callback).
+    "top-up custom 20000 diterima (link bayar Midtrans)",
+    // startTopup dipanggil dari handler pesan teks -> render() mengirim
+    // sendMessage baru (bukan editMessageText seperti dari callback).
     err === null &&
-      (lastCall("sendPhoto")?.text ?? "").includes("Rp20.001"),
-    JSON.stringify({ caption: lastCall("sendPhoto")?.text?.slice(0, 150) }),
+      lastText("sendMessage").includes("Isi saldo Rp20.000"),
+    lastText("sendMessage").slice(0, 150),
   );
 
   // ================= S22: promo tidak ditemukan / kedaluwarsa / habis =================
@@ -1424,13 +1442,13 @@ async function main(): Promise<void> {
   ores = await orderPost(orderReq(orderBody));
   const oresBody2 = (await ores.json()) as {
     ok: boolean;
-    payment?: { qrPngBase64: string; uniqueAmountIdr: number };
+    payment?: { redirectUrl: string; snapToken: string };
   };
   check(
-    "supplier API error: fail open, order + QRIS tetap jalan",
+    "supplier API error: fail open, order + Midtrans tetap jalan",
     ores.status === 201 &&
-      !!oresBody2.payment?.qrPngBase64 &&
-      oresBody2.payment?.uniqueAmountIdr === 1501,
+      (oresBody2.payment?.redirectUrl ?? "").includes("redirection") &&
+      oresBody2.payment?.snapToken === "SNAP-HARNESS",
     `status ${ores.status}`,
   );
   stubControl.sondevFail = false;
@@ -1504,6 +1522,12 @@ async function main(): Promise<void> {
     ),
   );
   // (b) Sesi GoBiz kedaluwarsa -> error jelas + tick tidak throw.
+  // (Ada pembayaran pending, jadi tick benar-benar butuh feed.)
+  createQrisPayment({
+    reference: "UD-NOSESSION-1",
+    amountIdr: 1500,
+    staticPayload: TEST_STATIC_QRIS,
+  });
   gopayClient.clearSession();
   const tickNoSession = await tickQrisPayments();
   check(
@@ -1511,6 +1535,7 @@ async function main(): Promise<void> {
     tickNoSession.ok === false && tickNoSession.code === "auth_required",
     JSON.stringify(tickNoSession),
   );
+  getDb().prepare("DELETE FROM qris_payments WHERE reference = ?").run("UD-NOSESSION-1");
   // Pulihkan sesi untuk skenario berikut.
   gopayClient.saveSession({
     accessToken: "AT-HARNESS",
@@ -1590,16 +1615,10 @@ async function main(): Promise<void> {
   const sAfterBody = (await sAfter.json()) as { authenticated?: boolean };
   check("GoPay logout: sesi terhapus", sAfterBody.authenticated === false);
 
-  // ================= S32: tombol "Saya Sudah Bayar" (cek manual QRIS) =================
-  // Sesi dipulihkan dulu (S31 logout menghapusnya).
-  gopayClient.saveSession({
-    accessToken: "AT-HARNESS",
-    refreshToken: "RT-HARNESS",
-    tokenType: "Bearer",
-    expiresAt: Date.now() + 3600_000,
-    phone: "81234567890",
-    merchantId: "M-HARNESS",
-  });
+  // ================= S32: tombol "Saya Sudah Bayar" (cek manual Midtrans) =================
+  // Jalur QRIS GoBiz sudah tidak dipakai bot (Midtrans jadi jalur aktif);
+  // cek manual di sini menguji jalur Midtrans (midtrans_check).
+  stubControl.midtransStatus = "pending";
   const latestTopupId = (): string | undefined =>
     (
       getDb()
@@ -1608,83 +1627,83 @@ async function main(): Promise<void> {
         )
         .get(111) as { id: string } | undefined
     )?.id;
-  const topupUnique = (id: string): number =>
-    (
-      getDb()
-        .prepare("SELECT unique_amount_idr FROM qris_payments WHERE reference = ?")
-        .get(id) as { unique_amount_idr: number }
-    ).unique_amount_idr;
-  stubControl.feedTransactions = [];
-  // (a) Foto QR top-up membawa tombol cek.
+  // (a) Link bayar top-up membawa tombol cek.
   await send(cbUpdate(buyer, "topup:10000"));
   const checkTopupId = latestTopupId();
-  const checkPhoto = lastCall("sendPhoto");
+  const checkKbMt = kbText(lastCall("editMessageText"));
   check(
-    "cek manual: foto QR top-up ada tombol Saya Sudah Bayar",
-    kbText(checkPhoto).includes("Saya Sudah Bayar") &&
-      kbText(checkPhoto).includes(`qris_check:${checkTopupId ?? "?"}`),
-    kbText(checkPhoto).slice(0, 200),
+    "cek manual: link bayar top-up ada tombol Saya Sudah Bayar",
+    checkKbMt.includes("Saya Sudah Bayar") &&
+      checkKbMt.includes(`midtrans_check:${checkTopupId ?? "?"}`),
+    checkKbMt.slice(0, 200),
   );
-  // (b) Tap cek, feed kosong -> "belum masuk".
-  err = await send(cbUpdate(buyer, `qris_check:${checkTopupId}`));
+  // (b) Tap cek, status pending -> "belum masuk".
+  err = await send(cbUpdate(buyer, `midtrans_check:${checkTopupId}`));
   check(
-    "cek manual: feed kosong -> belum masuk",
+    "cek manual: status pending -> belum masuk",
     err === null && lastText("sendMessage").includes("belum masuk"),
     lastText("sendMessage").slice(0, 150),
   );
   // (c) Tap lagi langsung -> throttle 10 detik.
-  err = await send(cbUpdate(buyer, `qris_check:${checkTopupId}`));
+  err = await send(cbUpdate(buyer, `midtrans_check:${checkTopupId}`));
   check(
     "cek manual: tap kedua langsung -> throttle",
     lastText("sendMessage").includes("Baru saja dicek"),
     lastText("sendMessage").slice(0, 150),
   );
-  // (d) Top-up baru + feed cocok -> "diterima" + saldo masuk.
+  // (d) Top-up baru + status settlement -> "diterima" + saldo masuk.
+  // Pembayaran pending lain (order S15, top-up S21) ditandai expired dulu
+  // supaya tick di (d) tidak ikut melunaskannya.
   const balBefore = getWallet(111).balanceIdr;
   await send(cbUpdate(buyer, "topup:50000"));
   const checkTopup2Id = latestTopupId();
   if (checkTopup2Id) {
-    stubControl.feedTransactions = [
-      { id: "TX-CHECK-50001", amountIdr: topupUnique(checkTopup2Id) },
-    ];
+    getDb()
+      .prepare(
+        "UPDATE midtrans_payments SET status = 'expired' WHERE status = 'pending' AND order_id != ?",
+      )
+      .run(checkTopup2Id);
   }
-  err = await send(cbUpdate(buyer, `qris_check:${checkTopup2Id}`));
+  stubControl.midtransStatus = "settlement";
+  err = await send(cbUpdate(buyer, `midtrans_check:${checkTopup2Id}`));
   check(
-    "cek manual: feed cocok -> diterima + saldo masuk",
+    "cek manual: status settlement -> diterima + saldo masuk",
     lastText("sendMessage").includes("Pembayaran diterima") &&
       getWallet(111).balanceIdr === balBefore + 50000,
     `${lastText("sendMessage").slice(0, 120)} | saldo=${getWallet(111).balanceIdr}`,
   );
-  // (e) Sesi GoBiz habis -> pesan jujur (bukan "belum masuk").
-  gopayClient.clearSession();
-  await send(cbUpdate(buyer, "topup:15000"));
-  const checkTopup3Id = latestTopupId();
-  err = await send(cbUpdate(buyer, `qris_check:${checkTopup3Id}`));
+  // (e) Midtrans belum dikonfigurasi -> pesan jujur (bukan "belum masuk").
+  const savedMtKey = process.env.MIDTRANS_SERVER_KEY;
+  delete process.env.MIDTRANS_SERVER_KEY;
+  const cfgTopup = createTopup(111, 10000);
+  createMidtransPayment({
+    orderId: cfgTopup.id,
+    amountIdr: 10000,
+    snapToken: "SNAP-NOCFG",
+    redirectUrl: "https://app.sandbox.midtrans.com/snap/v1/redirection/nocfg",
+  });
+  err = await send(cbUpdate(buyer, `midtrans_check:${cfgTopup.id}`));
   check(
-    "cek manual: sesi habis -> pesan sesi GoBiz belum login",
-    lastText("sendMessage").includes("sesi GoBiz belum login"),
+    "cek manual: Midtrans belum dikonfigurasi -> pesan jelas",
+    lastText("sendMessage").includes("belum dikonfigurasi"),
     lastText("sendMessage").slice(0, 150),
   );
-  gopayClient.saveSession({
-    accessToken: "AT-HARNESS",
-    refreshToken: "RT-HARNESS",
-    tokenType: "Bearer",
-    expiresAt: Date.now() + 3600_000,
-    phone: "81234567890",
-    merchantId: "M-HARNESS",
+  process.env.MIDTRANS_SERVER_KEY = savedMtKey;
+  // (f) Link kedaluwarsa (expires_at dimundurkan) -> pesan kedaluwarsa.
+  const expTopup = createTopup(111, 10000);
+  createMidtransPayment({
+    orderId: expTopup.id,
+    amountIdr: 10000,
+    snapToken: "SNAP-EXP",
+    redirectUrl: "https://app.sandbox.midtrans.com/snap/v1/redirection/exp",
   });
-  // (f) QR kedaluwarsa -> pesan kedaluwarsa.
-  await send(cbUpdate(buyer, "topup:20000"));
-  const checkTopup4Id = latestTopupId();
-  if (checkTopup4Id) {
-    getDb()
-      .prepare("UPDATE qris_payments SET expires_at = ? WHERE reference = ?")
-      .run(new Date(Date.now() - 1000).toISOString(), checkTopup4Id);
-  }
-  stubControl.feedTransactions = [];
-  err = await send(cbUpdate(buyer, `qris_check:${checkTopup4Id}`));
+  getDb()
+    .prepare("UPDATE midtrans_payments SET expires_at = ? WHERE order_id = ?")
+    .run(new Date(Date.now() - 1000).toISOString(), expTopup.id);
+  stubControl.midtransStatus = "pending";
+  err = await send(cbUpdate(buyer, `midtrans_check:${expTopup.id}`));
   check(
-    "cek manual: QR kedaluwarsa -> pesan kedaluwarsa",
+    "cek manual: link kedaluwarsa -> pesan kedaluwarsa",
     lastText("sendMessage").includes("kedaluwarsa"),
     lastText("sendMessage").slice(0, 150),
   );
@@ -1772,6 +1791,105 @@ async function main(): Promise<void> {
   );
   delete process.env.TELEGRAM_CHANNEL_ID;
   delete process.env.TELEGRAM_CHANNEL_URL;
+
+  // ================= S34: bayar via Midtrans Snap =================
+  stubControl.midtransStatus = "pending";
+  // (a) Checkout -> pay_midtrans -> link bayar Midtrans dikirim.
+  await send(textUpdate(buyer, "/start"));
+  err = await send(cbUpdate(buyer, "prod:muse-token-1b"));
+  err = await send(cbUpdate(buyer, "qty:muse-token-1b:1"));
+  err = await send(textUpdate(buyer, "https://muse.ai/invite/789"));
+  err = await send(cbUpdate(buyer, "promo_skip"));
+  check(
+    "midtrans: layar bayar ada tombol Midtrans",
+    kbText(lastCall("editMessageText") as Call).includes("pay_midtrans"),
+    kbText(lastCall("editMessageText") as Call).slice(0, 200),
+  );
+  err = await send(cbUpdate(buyer, "pay_midtrans"));
+  const mtText = lastText("editMessageText");
+  const mtOrderId = /UD-[A-Z0-9-]+/.exec(mtText)?.[0] ?? "";
+  check(
+    "midtrans: link bayar dikirim + order dibuat",
+    err === null && mtText.includes("Pembayaran Midtrans") && mtOrderId.length > 0,
+    mtText.slice(0, 150),
+  );
+  check(
+    "midtrans: tombol Buka Pembayaran + Sudah Bayar ada",
+    kbText(lastCall("editMessageText") as Call).includes("Buka Pembayaran") &&
+      kbText(lastCall("editMessageText") as Call).includes(`midtrans_check:${mtOrderId}`),
+    kbText(lastCall("editMessageText") as Call).slice(0, 200),
+  );
+  check(
+    "midtrans: baris pembayaran pending tersimpan",
+    getMidtransPayment(mtOrderId)?.status === "pending",
+    getMidtransPayment(mtOrderId)?.status ?? "?",
+  );
+  // (b) Status masih pending -> tap cek -> belum masuk.
+  err = await send(cbUpdate(buyer, `midtrans_check:${mtOrderId}`));
+  check(
+    "midtrans: status pending -> belum masuk",
+    lastText("sendMessage").includes("belum masuk"),
+    lastText("sendMessage").slice(0, 120),
+  );
+  // (c) Status settlement -> poller tick -> lunas + ter-fulfill delivered.
+  // Pembayaran pending lain (baris S32e) ditandai expired dulu supaya
+  // tick di sini hanya melunaskan order S34.
+  getDb()
+    .prepare(
+      "UPDATE midtrans_payments SET status = 'expired' WHERE status = 'pending' AND order_id != ?",
+    )
+    .run(mtOrderId);
+  stubControl.midtransStatus = "settlement";
+  const tickMt = await tickMidtransPayments();
+  check("midtrans: poller lunas 1", tickMt.matched === 1, JSON.stringify(tickMt));
+  for (let i = 0; i < 50; i++) {
+    const o = await getStoreOrder(mtOrderId);
+    if (o?.status === "delivered") break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  check(
+    "midtrans: order ter-fulfill delivered",
+    (await getStoreOrder(mtOrderId))?.status === "delivered",
+    (await getStoreOrder(mtOrderId))?.status ?? "?",
+  );
+  // (d) Webhook: signature benar -> 200 + order lunas; signature salah -> 401.
+  const whOrder = await createStoreOrder({
+    catalogProductId: "muse-token-1b",
+    quantity: 1,
+    buyerRef: "tg:111",
+    target: "https://muse.ai/invite/456",
+  });
+  createMidtransPayment({
+    orderId: whOrder.id,
+    amountIdr: whOrder.retailTotalIdr,
+    snapToken: "SNAP-WH",
+    redirectUrl: "https://app.sandbox.midtrans.com/snap/v1/redirection/wh",
+  });
+  const { POST: midtransWebhookPOST } = await import("../app/api/webhooks/midtrans/route");
+  const whSig = createHash("sha512")
+    .update(`${whOrder.id}200${whOrder.retailTotalIdr}TEST-SERVER-KEY`)
+    .digest("hex");
+  const whReq = (sig: string) =>
+    new Request("http://localhost/api/webhooks/midtrans", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        order_id: whOrder.id,
+        status_code: "200",
+        gross_amount: String(whOrder.retailTotalIdr),
+        signature_key: sig,
+        transaction_status: "settlement",
+      }),
+    });
+  const whRes = await midtransWebhookPOST(whReq(whSig));
+  check(
+    "midtrans: webhook signature benar -> 200 + order lunas",
+    whRes.status === 200 &&
+      (await getStoreOrder(whOrder.id))?.status !== "awaiting_payment",
+    `status=${whRes.status} order=${(await getStoreOrder(whOrder.id))?.status}`,
+  );
+  const whBad = await midtransWebhookPOST(whReq("0".repeat(128)));
+  check("midtrans: webhook signature salah -> 401", whBad.status === 401, `status=${whBad.status}`);
 
   // ---- ringkasan ----
   const failed = results.filter((r) => !r.ok);

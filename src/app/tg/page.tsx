@@ -76,8 +76,8 @@ export default function TgShopPage() {
   const [error, setError] = useState<string | null>(null);
   const [doneOrderId, setDoneOrderId] = useState<string | null>(null);
   const [payment, setPayment] = useState<{
-    qrPngBase64: string;
-    uniqueAmountIdr: number;
+    redirectUrl: string;
+    snapToken: string;
     expiresAt: string;
     orderId: string;
   } | null>(null);
@@ -178,8 +178,8 @@ export default function TgShopPage() {
       }
       const order = body.order as { id: string; status: string };
       const pay = body.payment as {
-        qrPngBase64: string;
-        uniqueAmountIdr: number;
+        redirectUrl: string;
+        snapToken: string;
         expiresAt: string;
       } | null;
       setDoneOrderId(order.id);
@@ -189,8 +189,8 @@ export default function TgShopPage() {
         return;
       }
       setPayment({
-        qrPngBase64: pay.qrPngBase64,
-        uniqueAmountIdr: pay.uniqueAmountIdr,
+        redirectUrl: pay.redirectUrl,
+        snapToken: pay.snapToken,
         expiresAt: pay.expiresAt,
         orderId: order.id,
       });
@@ -448,22 +448,22 @@ export default function TgShopPage() {
           </div>
           {payment ? (
             <div style={{ textAlign: "center" }}>
-              {/* eslint-disable-next-line @next/next/no-img-element */}
-              <img
-                src={`data:image/png;base64,${payment.qrPngBase64}`}
-                alt="QRIS pembayaran"
-                style={{ width: "100%", maxWidth: 360, borderRadius: 12 }}
-              />
+              <a
+                href={payment.redirectUrl}
+                target="_blank"
+                rel="noreferrer"
+                style={{ ...btnStyle, display: "block", textDecoration: "none" }}
+              >
+                💳 Buka Pembayaran (QRIS)
+              </a>
               <div style={{ fontSize: 14, marginTop: 8 }}>
-                Scan QR di atas — nominal{" "}
-                <strong>{rupiah(payment.uniqueAmountIdr)}</strong> (harus pas).
-                Berlaku sampai{" "}
+                Tap tombol di atas untuk bayar — link berlaku sampai{" "}
                 {new Date(payment.expiresAt).toLocaleTimeString("id-ID", {
                   timeZone: "Asia/Jakarta",
                   hour: "2-digit",
                   minute: "2-digit",
                 })}{" "}
-                WIB.
+                WIB (30 menit).
               </div>
               <div style={{ fontSize: 13, color: theme.hint, marginTop: 6 }}>
                 {orderStatus === "awaiting_payment" &&

@@ -281,7 +281,7 @@ export async function setOrderTarget(id: string, target: string): Promise<StoreO
 /** Catat cara bayar order (dipanggil sebelum markPaid dari jalur bot / poller). */
 export async function setOrderPaidVia(
   id: string,
-  paidVia: "qris" | "wallet",
+  paidVia: "qris" | "wallet" | "midtrans",
 ): Promise<StoreOrder> {
   return updateOrder(id, { paidVia });
 }

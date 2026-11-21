@@ -9,6 +9,7 @@ dotenv.config({ path: ".env.local" });
 import { createBot } from "./bot";
 import { gopayPollIntervalMs } from "../lib/config";
 import { tickQrisPayments } from "../lib/payments/qris-poller";
+import { tickMidtransPayments } from "../lib/payments/midtrans-poller";
 
 const bot = createBot();
 
@@ -23,11 +24,12 @@ bot.start().then(() => {
   console.log("Unicodes Digital bot jalan (long polling)...");
 });
 
-// Poller feed GoBiz — SATU-SATUNYA tempat pembayaran QRIS dinyatakan lunas
-// (lihat src/lib/payments/qris-poller.ts). Jalan di proses bot saja (bukan
-// di web) supaya tidak ada dua poller yang rebutan memproses transaksi yang
-// sama. tick() tidak pernah throw; kalau sesi GoBiz belum login, tick
-// mengembalikan ok:false dan dicatat sebagai peringatan (bukan crash).
+// Poller pembayaran — SATU-SATUNYA tempat pembayaran dinyatakan lunas
+// (QRIS GoBiz di qris-poller.ts, Midtrans di midtrans-poller.ts). Jalan di
+// proses bot saja (bukan di web) supaya tidak ada dua poller yang rebutan
+// memproses transaksi yang sama. tick() tidak pernah throw; kalau sesi
+// GoBiz belum login, tick mengembalikan ok:false dan dicatat sebagai
+// peringatan (bukan crash). Midtrans yang belum dikonfigurasi diam saja.
 let pollerRunning = false;
 async function pollOnce(): Promise<void> {
   if (pollerRunning) return; // tick sebelumnya belum selesai — lewati jadwal ini
@@ -39,6 +41,14 @@ async function pollOnce(): Promise<void> {
     } else if (result.matched > 0 || result.expired > 0) {
       console.log(
         `[qris-poller] dicek ${result.checked}, lunas ${result.matched}, kedaluwarsa ${result.expired}.`,
+      );
+    }
+    const midtrans = await tickMidtransPayments();
+    if (!midtrans.ok) {
+      console.warn(`[midtrans-poller] ${midtrans.code}: ${midtrans.error}`);
+    } else if (midtrans.matched > 0 || midtrans.expired > 0) {
+      console.log(
+        `[midtrans-poller] dicek ${midtrans.checked}, lunas ${midtrans.matched}, kedaluwarsa ${midtrans.expired}.`,
       );
     }
   } catch (err) {
