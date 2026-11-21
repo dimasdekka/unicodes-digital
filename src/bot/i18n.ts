@@ -130,8 +130,7 @@ const id: Strings = {
     `⚡ Welcome to Unicodes Digital, ${name}! 💜\n\n` +
     `Toko AI & produk digital — harga jujur, proses instan.\n\n` +
     `🛍️ Di sini kamu bisa beli:\n` +
-    `• Muse AI Token — recharge 1B sampai 30B\n` +
-    `• Gemini & produk AI lainnya (segera hadir)\n\n` +
+    `• Muse AI Token — recharge 1B sampai 30B\n\n` +
     `💳 Cara belanja: pilih produk → bayar via QRIS → token langsung dikirim ke akun kamu. Atau isi saldo dulu di menu Saldo Saya, biar checkout berikutnya lebih cepat.\n\n` +
     (orders > 0
       ? `📦 ${orders} order • Total belanja: ${rupiah(spent)}\n\n`
@@ -295,8 +294,7 @@ const en: Strings = {
     `⚡ Welcome to Unicodes Digital, ${name}! 💜\n\n` +
     `AI & digital products store — honest prices, instant delivery.\n\n` +
     `🛍️ Here you can buy:\n` +
-    `• Muse AI Token — 1B to 30B recharge\n` +
-    `• Gemini & other AI products (coming soon)\n\n` +
+    `• Muse AI Token — 1B to 30B recharge\n\n` +
     `💳 How to shop: pick a product → pay via QRIS → the token is sent straight to your account. Or top up your balance in the My Balance menu first, so your next checkout is faster.\n\n` +
     (orders > 0
       ? `📦 ${orders} ${orders === 1 ? "order" : "orders"} • Total spent: ${rupiah(spent)}\n\n`

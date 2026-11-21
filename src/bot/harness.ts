@@ -536,10 +536,14 @@ async function main(): Promise<void> {
     lastText("sendMessage").slice(0, 300),
   );
   check(
-    "/start keyboard ada Katalog + Saldo + Referral",
+    "/start keyboard fokus Sondev: Katalog + Saldo + Pesanan, tanpa Referral/Promo/Reseller/Bahasa",
     kbText(lastCall("sendMessage") as Call).includes("Katalog") &&
       kbText(lastCall("sendMessage") as Call).includes("Saldo") &&
-      kbText(lastCall("sendMessage") as Call).includes("Referral"),
+      kbText(lastCall("sendMessage") as Call).includes("Pesanan") &&
+      !kbText(lastCall("sendMessage") as Call).includes("Referral") &&
+      !kbText(lastCall("sendMessage") as Call).includes("Promo") &&
+      !kbText(lastCall("sendMessage") as Call).includes("Reseller") &&
+      !kbText(lastCall("sendMessage") as Call).includes("Bahasa"),
   );
 
   // ================= S2: referral via /start ref_ =================
@@ -551,17 +555,18 @@ async function main(): Promise<void> {
   err = await send(cbUpdate(buyer, "cat"));
   check("tombol Katalog tidak throw", err === null, err ?? undefined);
   check(
-    "katalog menampilkan pilih kategori (Muse / AI Lain / Semua)",
-    kbText(lastCall("editMessageText")).includes("Muse") &&
-      kbText(lastCall("editMessageText")).includes("AI Lain") &&
-      kbText(lastCall("editMessageText")).includes("Semua"),
+    "katalog fokus Sondev: langsung produk Muse, tanpa AI Lain / Gemini",
+    kbText(lastCall("editMessageText")).includes("Muse AI Token") &&
+      !kbText(lastCall("editMessageText")).includes("AI Lain") &&
+      !kbText(lastCall("editMessageText")).includes("Gemini"),
     kbText(lastCall("editMessageText")).slice(0, 200),
   );
   err = await send(cbUpdate(buyer, "cat:all"));
   check("pilih kategori Semua tidak throw", err === null, err ?? undefined);
   check(
-    "katalog Semua menampilkan Muse (tombol)",
-    kbText(lastCall("editMessageText")).includes("Muse AI Token"),
+    "katalog Semua (Sondev saja) menampilkan Muse (tombol)",
+    kbText(lastCall("editMessageText")).includes("Muse AI Token") &&
+      !kbText(lastCall("editMessageText")).includes("Gemini"),
     kbText(lastCall("editMessageText")).slice(0, 150),
   );
   err = await send(cbUpdate(buyer, "prod:muse-token-1b"));
@@ -808,8 +813,11 @@ async function main(): Promise<void> {
   // ================= S14: legacy /products /order /fulfill =================
   err = await send(textUpdate(buyer, "/products"));
   check(
-    "/products menampilkan pilih kategori",
-    err === null && kbText(lastCall("sendMessage")).includes("AI Lain"),
+    "/products fokus Sondev: langsung daftar Muse, tanpa AI Lain / Gemini",
+    err === null &&
+      kbText(lastCall("sendMessage")).includes("Muse AI Token") &&
+      !kbText(lastCall("sendMessage")).includes("AI Lain") &&
+      !kbText(lastCall("sendMessage")).includes("Gemini"),
     err ?? kbText(lastCall("sendMessage")).slice(0, 120),
   );
   err = await send(textUpdate(buyer, `/order ${myOrderId}`));
@@ -953,16 +961,18 @@ async function main(): Promise<void> {
   );
   err = await send(cbUpdate(buyer, "cat:AI Lain"));
   check(
-    "kategori AI Lain hanya menampilkan Gemini",
-    kbText(lastCall("editMessageText")).includes("Gemini") &&
+    "kategori AI Lain disembunyikan di bot (daftar kosong, tanpa Gemini)",
+    err === null &&
+      !kbText(lastCall("editMessageText")).includes("Gemini") &&
       !kbText(lastCall("editMessageText")).includes("Muse AI Token"),
     kbText(lastCall("editMessageText")).slice(0, 200),
   );
   err = await send(cbUpdate(buyer, "cat:all"));
   check(
-    "kategori Semua menampilkan badge Segera Hadir untuk Gemini",
-    kbText(lastCall("editMessageText")).includes("Segera Hadir") &&
-      kbText(lastCall("editMessageText")).includes("Muse AI Token"),
+    "kategori Semua (Sondev saja): Muse saja, tanpa Gemini / Segera Hadir",
+    kbText(lastCall("editMessageText")).includes("Muse AI Token") &&
+      !kbText(lastCall("editMessageText")).includes("Gemini") &&
+      !kbText(lastCall("editMessageText")).includes("Segera Hadir"),
     kbText(lastCall("editMessageText")).slice(0, 200),
   );
   // Produk coming_soon tidak bisa dibeli.

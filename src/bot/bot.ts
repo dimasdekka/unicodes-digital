@@ -12,8 +12,8 @@
 import { Bot, InlineKeyboard, InputFile, type Context } from "grammy";
 import {
   getCatalogProduct,
+  listActiveProducts,
   listActiveProductsByCategory,
-  listCategories,
 } from "../lib/catalog";
 import {
   createStoreOrder,
@@ -105,12 +105,12 @@ function menuKeyboard(lang: Lang): InlineKeyboard {
   const kb = new InlineKeyboard();
   const webAppUrl = getWebAppUrl();
   if (webAppUrl) kb.webApp("🌐 Buka Toko", webAppUrl).row();
+  // FOKUS SONDEV (2026-11-21): menu disederhanakan — hanya inti belanja
+  // Muse. Referral / Promo / Reseller & API / Bahasa DISEMBUNYIKAN dulu
+  // (handler-nya tetap ada, tinggal tampilkan lagi tombolnya kalau perlu).
   kb.text(s.catalog, "cat").row();
   kb.text(s.myBalance, "wallet").text(s.myOrders, "orders").row();
-  kb.text(s.referral, "ref").text(s.promo, "promo").row();
   kb.text(s.support, "support").text(s.policy, "policy").row();
-  kb.text(s.reseller, "reseller").row();
-  kb.text(s.language, "lang").row();
   return kb;
 }
 
@@ -190,15 +190,28 @@ async function showMenu(ctx: Context): Promise<void> {
   await render(ctx, text, kb);
 }
 
-/** Katalog: tanpa kategori = pilih kategori dulu; dengan kategori = daftar
- *  produk kategori itu ("Semua" = semua produk). */
+/** Katalog BOT — fokus Sondev/Muse saja (2026-11-21): produk supplier lain
+ *  (Gemini/LahaStore) DISEMBUNYIKAN dari bot. Tanpa kategori = langsung
+ *  daftar produk kalau cuma ada 1 kategori; dengan kategori = daftar produk
+ *  kategori itu ("Semua" = semua produk Sondev). Web tidak berubah. */
 async function showCatalog(ctx: Context, category?: string): Promise<void> {
   const id = uid(ctx);
   if (id == null) return;
   const s = sOf(id);
+  const sondevCats = [
+    ...new Set(
+      listActiveProducts()
+        .filter((p) => p.supplier === "sondev")
+        .map((p) => p.category),
+    ),
+  ];
   if (!category) {
+    if (sondevCats.length === 1) {
+      await showCatalog(ctx, sondevCats[0]);
+      return;
+    }
     const kb = new InlineKeyboard();
-    for (const cat of listCategories()) {
+    for (const cat of sondevCats) {
       kb.text(cat, `cat:${cat}`).row();
     }
     kb.text(s.categoryAll, "cat:all").row();
@@ -207,7 +220,9 @@ async function showCatalog(ctx: Context, category?: string): Promise<void> {
     return;
   }
   const kb = new InlineKeyboard();
-  for (const p of listActiveProductsByCategory(category)) {
+  for (const p of listActiveProductsByCategory(category).filter(
+    (p) => p.supplier === "sondev",
+  )) {
     const emoji =
       p.stockState === "available" ? "✅" : p.stockState === "out_of_stock" ? "🔴" : "⏳";
     const suffix =
@@ -685,7 +700,7 @@ async function showReferral(ctx: Context): Promise<void> {
   const stats = getReferralStats(id);
   const link = referralLink(id);
   const shareUrl = `https://t.me/share/url?url=${encodeURIComponent(link)}&text=${encodeURIComponent(
-    "Belanja AI murah di Unicodes Digital — Muse, Gemini, dan lainnya!",
+    "Belanja token Muse murah di Unicodes Digital!",
   )}`;
   const kb = new InlineKeyboard()
     .text("🏆 Top Referral", "reftop")
