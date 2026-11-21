@@ -1,0 +1,35 @@
+# Unicodes Digital — systemd (VPS / Oracle Always Free)
+#
+# Satu service menjalankan web + bot Telegram (lihat scripts/vps-start.sh).
+# Satu service = satu file dev.db dipakai bareng web & bot — jangan dipisah
+# jadi dua service, nanti databasenya jadi dua.
+#
+# Pasang:
+#   sudo cp scripts/unicodes-digital.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now unicodes-digital
+#   sudo systemctl status unicodes-digital
+#   sudo journalctl -u unicodes-digital -f
+#
+# Sebelum enable: pastikan /opt/unicodes-digital berisi repo ini + .env.local
+# + src/bot/assets/banner.jpg + src/bot/assets/qris-standee.jpg
+# (lihat DEPLOY-VPS.md). User di bawah sesuaikan dengan user VPS kamu
+# (Oracle Ubuntu default: ubuntu; Hetzner/DigitalOcean: root atau user lain).
+[Unit]
+Description=Unicodes Digital (web + bot Telegram)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/unicodes-digital
+Environment=PORT=3100
+Environment=NODE_ENV=production
+ExecStart=/bin/sh /opt/unicodes-digital/scripts/vps-start.sh
+Restart=always
+RestartSec=5
+User=ubuntu
+Group=ubuntu
+
+[Install]
+WantedBy=multi-user.target
