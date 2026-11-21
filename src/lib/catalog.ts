@@ -67,7 +67,7 @@ export const CATALOG: CatalogProduct[] = [
   // --- Sondev = Muse ---
   {
     id: "muse-token-1b",
-    name: "Muse AI Token — Recharge 1B",
+    name: "Muse AI Token 1B",
     description: "Recharge 1 miliar token Muse ke akun kamu.",
     supplier: "sondev",
     supplierProductCode: "muse_token",

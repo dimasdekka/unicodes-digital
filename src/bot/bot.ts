@@ -60,7 +60,7 @@ import { rupiah, t, type Strings } from "./i18n";
 import { fixedFetch } from "./fixed-fetch";
 import { cancelAwaiting, getSession, type CheckoutDraft } from "./session";
 import { getWebAppUrl } from "./menu-button";
-import { telegramAdminIds, telegramBotToken, telegramChannelId, telegramChannelUrl, midtransConfigured } from "../lib/config";
+import { telegramAdminIds, telegramBotToken, telegramChannelId, telegramChannelUrl, midtransConfigured, productBannerFileId } from "../lib/config";
 import {
   createMidtransPayment,
   createSnapTransaction,
@@ -70,6 +70,13 @@ import { tickMidtransPayments } from "../lib/payments/midtrans-poller";
 
 const ADMIN_USERNAME = "@Dimas0227";
 const QTY_PACKS = [1, 5, 10, 30];
+
+/** Support DIMATIKAN dulu (Dim 2026-11-21): tombol sudah dihapus dari menu,
+ *  tapi tombol di pesan lama + pesan yang sudah masuk mode support masih
+ *  bisa memicu forward ke nomor admin — semua jalur itu dijawab "tidak
+ *  tersedia" dan TIDAK diteruskan. Balik ke true + tampilkan lagi tombolnya
+ *  kalau support mau dihidupkan. Handler + layar support tetap ada. */
+const SUPPORT_ENABLED = false;
 
 /** Shortcut command di menu "/" Telegram. /menu TIDAK didaftarkan (dobel
  *  dengan /start) — handler /menu di bawah tetap ada buat yang mengetik
@@ -138,7 +145,11 @@ function backToCatalogRow(lang: Lang): InlineKeyboard {
 
 // -------------------------------------------------------------- render ---
 
-/** Tampilkan layar: edit pesan (kalau dari tombol) atau kirim baru. */
+/** Tampilkan layar: edit pesan (kalau dari tombol) atau kirim baru.
+ *  Pesan FOTO tidak bisa diedit teksnya pakai editMessageText (Telegram
+ *  menolak: "there is no text in the message to edit") — untuk pesan foto
+ *  pakai editMessageCaption, supaya navigasi tetap 1 pesan, tidak menumpuk
+ *  pesan baru di bawah banner. */
 async function render(
   ctx: Context,
   text: string,
@@ -151,7 +162,17 @@ async function render(
   };
   if (ctx.callbackQuery?.message) {
     try {
-      await ctx.editMessageText(text, opts);
+      const msg = ctx.callbackQuery.message;
+      if ("photo" in msg && msg.photo?.length) {
+        // editMessageCaption grammY: caption masuk di objek opsi.
+        await ctx.editMessageCaption({
+          caption: text,
+          parse_mode: "HTML",
+          reply_markup: keyboard,
+        });
+      } else {
+        await ctx.editMessageText(text, opts);
+      }
       return;
     } catch {
       // Pesan tidak bisa diedit (terlalu lama / isi sama) — kirim baru saja.
@@ -322,7 +343,7 @@ async function showCatalog(ctx: Context, category?: string): Promise<void> {
       p.stockState === "available" ? "✅" : p.stockState === "out_of_stock" ? "🔴" : "⏳";
     const suffix =
       p.stockState === "available"
-        ? `${rupiah(p.retailPriceIdr)}${p.unit ? ` ${p.unit}` : ""}`
+        ? rupiah(p.retailPriceIdr)
         : s.stockLabel(p.stockState);
     kb.text(`${emoji} ${p.name} — ${suffix}`, `prod:${p.id}`).row();
   }
@@ -352,22 +373,57 @@ async function showProduct(ctx: Context, productId: string): Promise<void> {
     kb.text(`🛒 Beli 1 — ${rupiah(product.retailPriceIdr)}`, `qty:${product.id}:1`).row();
   }
   kb.text("⬅️ Katalog", "cat").text(s.backMenu, "menu");
-  await render(
-    ctx,
-    s.productDetail({
-      name: product.name,
-      desc: product.description,
-      price: product.retailPriceIdr,
-      unit: product.unit,
-      badge: product.badge,
-      features: product.features ?? [],
-      stock: s.stockLabel(product.stockState),
-      targetNote: product.requiresTarget
-        ? `Butuh ${product.targetLabel ?? "target"} saat checkout.`
-        : undefined,
-    }),
-    kb,
-  );
+  const caption = s.productDetail({
+    name: product.name,
+    desc: product.description,
+    price: product.retailPriceIdr,
+    unit: product.unit,
+    badge: product.badge,
+    features: product.features ?? [],
+    stock: s.stockLabel(product.stockState),
+    targetNote: product.requiresTarget
+      ? `Butuh ${product.targetLabel ?? "target"} saat checkout.`
+      : undefined,
+  });
+  // Detail produk ala Lhie: banner foto produk + caption (tetap 1 pesan).
+  // Pesan saat ini foto -> ganti medianya; pesan teks -> hapus lalu kirim
+  // foto baru (editMessageMedia pada pesan teks DITOLAK Telegram).
+  // Kalau banner tidak ada / gagal -> fallback teks biasa.
+  const bannerFileId = productBannerFileId(product.id);
+  if (bannerFileId) {
+    try {
+      const msg = ctx.callbackQuery?.message;
+      if (msg && "photo" in msg && msg.photo?.length) {
+        await ctx.editMessageMedia(
+          {
+            type: "photo",
+            media: bannerFileId,
+            caption,
+            parse_mode: "HTML",
+          },
+          { reply_markup: kb },
+        );
+        return;
+      }
+      if (msg) {
+        try {
+          await ctx.deleteMessage();
+        } catch {
+          // Pesan sudah tidak ada / tidak bisa dihapus — abaikan.
+        }
+      }
+      await ctx.replyWithPhoto(bannerFileId, {
+        caption,
+        parse_mode: "HTML",
+        reply_markup: kb,
+      });
+      return;
+    } catch (err) {
+      console.error("[bot] banner produk gagal, fallback teks:", err);
+      // Lanjut ke fallback teks di bawah — jangan diam.
+    }
+  }
+  await render(ctx, caption, kb);
 }
 
 // ------------------------------------------------------------ checkout ---
@@ -1541,6 +1597,12 @@ export function createBot(): Bot {
 
   bot.callbackQuery("support", async (ctx) => {
     await answerCb(ctx);
+    const id = uid(ctx);
+    if (id == null) return;
+    if (!SUPPORT_ENABLED) {
+      await render(ctx, sOf(id).supportOff, backRow(langOf(id)));
+      return;
+    }
     await showSupport(ctx);
   });
 
@@ -1549,6 +1611,10 @@ export function createBot(): Bot {
     const id = uid(ctx);
     if (id == null) return;
     const s = sOf(id);
+    if (!SUPPORT_ENABLED) {
+      await render(ctx, s.supportOff, backRow(langOf(id)));
+      return;
+    }
     getSession(id).awaiting = { kind: "support" };
     await render(ctx, s.supportAsk, backRow(langOf(id)));
   });
@@ -1694,9 +1760,13 @@ export function createBot(): Bot {
       return;
     }
 
-    // --- Pesan ke admin (support) ---
+    // --- Pesan ke admin (support) — DIMATIKAN: jangan forward ke admin. ---
     if (awaiting.kind === "support") {
       session.awaiting = undefined;
+      if (!SUPPORT_ENABLED) {
+        await ctx.reply(s.supportOff);
+        return;
+      }
       const adminId = adminChatId();
       if (adminId == null) {
         await ctx.reply(`${s.supportTitle}\n\nAdmin: ${ADMIN_USERNAME}`);

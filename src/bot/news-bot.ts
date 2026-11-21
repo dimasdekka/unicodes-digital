@@ -23,7 +23,6 @@ function infoText(): string {
   ];
   const channelUrl = telegramChannelUrl();
   if (channelUrl) lines.push(`👥 Komunitas: ${channelUrl}`);
-  lines.push("", "💬 Support: @Dimas0227");
   return lines.join("\n");
 }
 

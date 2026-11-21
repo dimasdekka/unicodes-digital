@@ -241,6 +241,50 @@ async function parseBody(init?: { body?: unknown }): Promise<Record<string, unkn
         },
       });
     }
+    if (method === "editMessageCaption") {
+      // Caption pesan foto (render() saat pesan saat ini adalah foto).
+      calls.push({
+        method,
+        chatId,
+        text: typeof body.caption === "string" ? body.caption : undefined,
+        keyboard: body.reply_markup,
+        data: body.message_id,
+      });
+      return fakeResponse({
+        ok: true,
+        result: {
+          message_id: body.message_id,
+          chat: { id: chatId, type: "private" },
+          caption: body.caption,
+          date: Math.floor(Date.now() / 1000),
+        },
+      });
+    }
+    if (method === "editMessageMedia") {
+      // Ganti media pesan foto (detail produk saat pesan saat ini foto).
+      const media = body.media as { media?: string; caption?: string } | undefined;
+      calls.push({
+        method,
+        chatId,
+        photo: typeof media?.media === "string" ? media.media : undefined,
+        text: typeof media?.caption === "string" ? media.caption : undefined,
+        keyboard: body.reply_markup,
+        data: body.message_id,
+      });
+      return fakeResponse({
+        ok: true,
+        result: {
+          message_id: body.message_id,
+          chat: { id: chatId, type: "private" },
+          caption: media?.caption,
+          date: Math.floor(Date.now() / 1000),
+        },
+      });
+    }
+    if (method === "deleteMessage") {
+      calls.push({ method, chatId, data: body.message_id });
+      return fakeResponse({ ok: true, result: true });
+    }
     if (method === "answerCallbackQuery") {
       calls.push({ method });
       return fakeResponse({ ok: true, result: true });
@@ -435,6 +479,8 @@ async function main(): Promise<void> {
     { tag: "60", value: "JAKARTA" },
   ]);
   setGopayStaticQris(TEST_STATIC_QRIS);
+  // Banner produk Muse (file_id palsu) — detail produk tampil sebagai foto.
+  process.env.PRODUCT_BANNER_FILE_ID_MUSE_TOKEN_1B = "TEST-PRODUCT-BANNER";
   // Sesi GoBiz mock (mock fetch mengembalikan token yang sama) supaya
   // tickQrisPayments bisa jalan tanpa login OTP sungguhan.
   gopayClient.saveSession({
@@ -503,7 +549,7 @@ async function main(): Promise<void> {
       },
     };
   };
-  const cbUpdate = (user: typeof buyer, data: string) => ({
+  const cbUpdate = (user: typeof buyer, data: string, extraMsg?: Record<string, unknown>) => ({
     update_id: updateId++,
     callback_query: {
       id: `cq${updateId}`,
@@ -513,19 +559,34 @@ async function main(): Promise<void> {
         chat: { id: user.id, type: "private" },
         date: Math.floor(Date.now() / 1000),
         text: "menu",
+        ...extraMsg,
       },
       data,
     },
   });
+  // editMessageText / editMessageCaption / editMessageMedia semuanya
+  // "layar saat ini" — caption sama dengan teks pesan buat assertion
+  // (render() mengedit caption kalau pesan saat ini adalah foto).
+  const isScreenCall = (c: Call, method?: string): boolean => {
+    if (!method) return true;
+    if (method === "editMessageText") {
+      return (
+        c.method === "editMessageText" ||
+        c.method === "editMessageCaption" ||
+        c.method === "editMessageMedia"
+      );
+    }
+    return c.method === method;
+  };
   const lastText = (method?: string): string => {
     for (let i = calls.length - 1; i >= 0; i--) {
-      if ((!method || calls[i].method === method) && calls[i].text) return calls[i].text as string;
+      if (isScreenCall(calls[i], method) && calls[i].text) return calls[i].text as string;
     }
     return "";
   };
   const anyText = (needle: string, method?: string): boolean =>
     calls.some(
-      (c) => (!method || c.method === method) && (c.text ?? "").includes(needle),
+      (c) => isScreenCall(c, method) && (c.text ?? "").includes(needle),
     );
   // Cari teks di kiriman SEJAK indeks tertentu — dipakai saat satu handler
   // mengirim 2 pesan berurutan (mis. promoInvalid lalu ringkasan order),
@@ -539,13 +600,12 @@ async function main(): Promise<void> {
       .slice(fromIndex)
       .some(
         (c) =>
-          (!method || c.method === method) &&
-          (c.text ?? "").includes(needle),
+          isScreenCall(c, method) && (c.text ?? "").includes(needle),
       );
   const kbText = (call?: Call): string => JSON.stringify(call?.keyboard ?? "");
   const lastCall = (method: string): Call | undefined => {
     for (let i = calls.length - 1; i >= 0; i--) {
-      if (calls[i].method === method) return calls[i];
+      if (isScreenCall(calls[i], method)) return calls[i];
     }
     return undefined;
   };
@@ -604,7 +664,8 @@ async function main(): Promise<void> {
   check("tombol Katalog tidak throw", err === null, err ?? undefined);
   check(
     "katalog fokus Sondev: langsung produk Muse, tanpa AI Lain / Gemini",
-    kbText(lastCall("editMessageText")).includes("Muse AI Token") &&
+    kbText(lastCall("editMessageText")).includes("Muse AI Token 1B — Rp1.500") &&
+      !kbText(lastCall("editMessageText")).includes("per 1B token") &&
       !kbText(lastCall("editMessageText")).includes("AI Lain") &&
       !kbText(lastCall("editMessageText")).includes("Gemini"),
     kbText(lastCall("editMessageText")).slice(0, 200),
@@ -620,11 +681,29 @@ async function main(): Promise<void> {
   err = await send(cbUpdate(buyer, "prod:muse-token-1b"));
   check("detail produk tidak throw", err === null, err ?? undefined);
   check(
-    "detail produk ada harga + paket jumlah",
-    lastText("editMessageText").includes("Rp1.500") &&
-      kbText(lastCall("editMessageText") as Call).includes("5B"),
-    lastText("editMessageText").slice(0, 100),
+    "detail produk ala Lhie: banner foto + caption harga/stok/detail + paket jumlah",
+    (lastCall("sendPhoto") as Call)?.photo === "TEST-PRODUCT-BANNER" &&
+      (lastCall("sendPhoto")?.text ?? "").includes("Muse AI Token 1B") &&
+      (lastCall("sendPhoto")?.text ?? "").includes("Rp1.500") &&
+      (lastCall("sendPhoto")?.text ?? "").includes("/unit") &&
+      (lastCall("sendPhoto")?.text ?? "").includes("Detail produk") &&
+      kbText(lastCall("sendPhoto") as Call).includes("5B") &&
+      calls.some((c) => c.method === "deleteMessage"),
+    JSON.stringify({ photo: (lastCall("sendPhoto") as Call)?.photo }),
   );
+  // Tanpa banner env -> fallback teks (edit caption pesan foto saat ini).
+  delete process.env.PRODUCT_BANNER_FILE_ID_MUSE_TOKEN_1B;
+  err = await send(cbUpdate(buyer, "cat"));
+  err = await send(cbUpdate(buyer, "prod:muse-token-1b"));
+  check(
+    "detail produk tanpa banner: fallback teks (edit di tempat)",
+    err === null &&
+      lastText("editMessageText").includes("Muse AI Token 1B") &&
+      lastText("editMessageText").includes("Rp1.500") &&
+      lastText("editMessageText").includes("/unit"),
+    lastText("editMessageText").slice(0, 120),
+  );
+  process.env.PRODUCT_BANNER_FILE_ID_MUSE_TOKEN_1B = "TEST-PRODUCT-BANNER";
   err = await send(cbUpdate(buyer, "prod:gemini-xiaomi-3bln"));
   check(
     "produk Gemini comingSoon",
@@ -786,17 +865,30 @@ async function main(): Promise<void> {
     lastText("sendMessage").slice(0, 120),
   );
 
-  // ================= S10: support forward + balasan admin =================
+  // ================= S10: support DIMATIKAN (Dim 2026-11-21) =================
+  // Tombol Support sudah dihapus dari menu; callback lama + pesan support
+  // TIDAK boleh lagi diteruskan ke admin (nomor Dim) — jawab "tidak tersedia".
+  const forwardsBefore = calls.filter((c) => c.method === "forwardMessage").length;
   err = await send(cbUpdate(buyer, "support"));
-  check("layar support ada admin", lastText("editMessageText").includes("@Dimas0227"));
+  check("support dimatikan: tidak throw", err === null, err ?? undefined);
+  check(
+    "support dimatikan: balas tidak tersedia, tanpa info admin",
+    lastText("editMessageText").includes("tidak tersedia") &&
+      !lastText("editMessageText").includes("@Dimas0227"),
+    lastText("editMessageText").slice(0, 150),
+  );
   err = await send(cbUpdate(buyer, "support_msg"));
+  check(
+    "support_msg dimatikan: tidak membuka input pesan",
+    err === null && lastText("editMessageText").includes("tidak tersedia"),
+    lastText("editMessageText").slice(0, 150),
+  );
   err = await send(textUpdate(buyer, "Order saya belum masuk, tolong dicek"));
   check("pesan support tidak throw", err === null, err ?? undefined);
   check(
-    "pesan support diteruskan ke admin",
-    calls.some((c) => c.method === "forwardMessage" && c.chatId === 807719771),
+    "pesan support TIDAK diteruskan ke admin",
+    calls.filter((c) => c.method === "forwardMessage").length === forwardsBefore,
   );
-  check("konfirmasi terkirim ke pembeli", lastText("sendMessage").includes("diteruskan ke admin"));
   const adminReply = textUpdate(admin, "Sudah dicek, token sudah masuk ya", {
     reply_to_message: {
       message_id: 555,
@@ -808,7 +900,7 @@ async function main(): Promise<void> {
   err = await send(adminReply);
   check("balasan admin tidak throw", err === null, err ?? undefined);
   check(
-    "balasan admin diteruskan ke pembeli",
+    "balasan admin ke thread lama tetap diteruskan ke pembeli",
     calls.some(
       (c) => c.method === "sendMessage" && c.chatId === 111 && (c.text ?? "").includes("Balasan admin"),
     ),
@@ -972,6 +1064,33 @@ async function main(): Promise<void> {
     "/menu mengirim banner juga",
     lastCall("sendPhoto")?.photo === "TEST-BANNER-FILE-ID",
     JSON.stringify(lastCall("sendPhoto")),
+  );
+  // Katalog dari menu foto: edit caption, BUKAN pesan baru (layout konsisten).
+  const smsBeforeCat = calls.filter((c) => c.method === "sendMessage").length;
+  err = await send(
+    cbUpdate(buyer, "cat", {
+      photo: [{ file_id: "TEST-BANNER-FILE-ID", file_unique_id: "u1", width: 100, height: 100 }],
+    }),
+  );
+  check(
+    "katalog dari menu foto mengedit caption (tetap 1 pesan)",
+    err === null &&
+      (lastCall("editMessageCaption")?.text ?? "").includes("Katalog Produk") &&
+      calls.filter((c) => c.method === "sendMessage").length === smsBeforeCat,
+    lastText("editMessageCaption").slice(0, 120),
+  );
+  // Detail produk dari pesan foto: ganti media (editMessageMedia).
+  err = await send(
+    cbUpdate(buyer, "prod:muse-token-1b", {
+      photo: [{ file_id: "TEST-BANNER-FILE-ID", file_unique_id: "u1", width: 100, height: 100 }],
+    }),
+  );
+  check(
+    "detail produk dari pesan foto: ganti media banner produk",
+    err === null &&
+      (lastCall("editMessageMedia") as Call)?.photo === "TEST-PRODUCT-BANNER" &&
+      ((lastCall("editMessageMedia") as Call)?.text ?? "").includes("Muse AI Token 1B"),
+    JSON.stringify({ photo: (lastCall("editMessageMedia") as Call)?.photo }),
   );
   // file_id tidak valid -> fallback teks, bot tidak diam.
   process.env.BOT_BANNER_FILE_ID = "BAD-FILE-ID";

@@ -45,6 +45,16 @@ export function telegramChannelUrl(): string {
   return (process.env.TELEGRAM_CHANNEL_URL ?? "").trim();
 }
 
+/** file_id banner produk per katalog (env PRODUCT_BANNER_FILE_ID_<ID>,
+ *  mis. PRODUCT_BANNER_FILE_ID_MUSE_TOKEN_1B). Kosong = detail produk
+ *  tampil sebagai teks biasa (tanpa foto). */
+export function productBannerFileId(productId: string): string {
+  const key = `PRODUCT_BANNER_FILE_ID_${productId
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, "_")}`;
+  return (process.env[key] ?? "").trim();
+}
+
 /** Server Key Midtrans (Basic auth API). Wajib untuk transaksi + cek status. */
 export function midtransServerKey(): string {
   return required("MIDTRANS_SERVER_KEY");

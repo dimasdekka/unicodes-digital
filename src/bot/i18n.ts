@@ -143,6 +143,7 @@ export interface Strings {
   supportTitle: string;
   supportAsk: string;
   supportSent: string;
+  supportOff: string;
   supportForwarded: (name: string, tgId: number, text: string) => string;
   supportReplyHint: string;
   policyTitle: string;
@@ -214,10 +215,11 @@ const id: Strings = {
   catalogPickCategory: "🛍️ <b>Katalog Produk</b>\n\nPilih kategori dulu:",
   categoryAll: "Semua",
   productDetail: (p) =>
-    `${p.badge ? `🏷️ <b>${p.badge}</b>\n` : ""}<b>${p.name}</b>\n\n${p.desc}\n\n` +
-    (p.features.length ? p.features.map((f) => `✅ ${f}`).join("\n") + "\n\n" : "") +
-    `💰 Harga: <b>${rupiah(p.price)}</b>${p.unit ? ` ${p.unit}` : ""}\n` +
-    `📦 Stok: ${p.stock}\n` +
+    `${p.badge ? `🏷️ <b>${p.badge}</b>\n` : ""}<b>${p.name}</b>\n\n` +
+    `💰 Harga: <b>${rupiah(p.price)}</b>/unit\n` +
+    `📦 Stok: ${p.stock}\n\n` +
+    `📋 Detail produk\n${p.desc}\n` +
+    (p.features.length ? p.features.map((f) => `✅ ${f}`).join("\n") + "\n" : "") +
     (p.targetNote ? `\n🎯 ${p.targetNote}` : ""),
   comingSoon: "⏳ Segera hadir — produk ini belum bisa dibeli sekarang. Cek lagi nanti ya!",
   outOfStock: "🔴 Stok habis — produk ini sedang kosong. Cek lagi nanti ya!",
@@ -351,6 +353,7 @@ const id: Strings = {
     "💬 <b>Support</b>\n\nAda kendala order / pembayaran? Hubungi admin: @Dimas0227\n\nAtau kirim pesan langsung dari sini — admin akan membalas ke chat ini.",
   supportAsk: "✉️ Tulis pesan kamu untuk admin (satu pesan), atau /cancel untuk batal.",
   supportSent: "✅ Pesan kamu sudah diteruskan ke admin. Tunggu balasannya di chat ini ya.",
+  supportOff: "💬 Support sedang tidak tersedia untuk saat ini.",
   supportForwarded: (name, tgId, text) =>
     `📩 <b>Pesan support</b> dari ${name} (tg:${tgId}):\n\n${text}\n\n<i>Balas pesan ini (reply) untuk menjawab pembeli.</i>`,
   supportReplyHint: "Balas pesan support yang diteruskan (reply) untuk menjawab pembeli.",
@@ -430,10 +433,11 @@ const en: Strings = {
   catalogPickCategory: "🛍️ <b>Product Catalog</b>\n\nPick a category first:",
   categoryAll: "All",
   productDetail: (p) =>
-    `${p.badge ? `🏷️ <b>${p.badge}</b>\n` : ""}<b>${p.name}</b>\n\n${p.desc}\n\n` +
-    (p.features.length ? p.features.map((f) => `✅ ${f}`).join("\n") + "\n\n" : "") +
-    `💰 Price: <b>${rupiah(p.price)}</b>${p.unit ? ` ${p.unit}` : ""}\n` +
-    `📦 Stock: ${p.stock}\n` +
+    `${p.badge ? `🏷️ <b>${p.badge}</b>\n` : ""}<b>${p.name}</b>\n\n` +
+    `💰 Price: <b>${rupiah(p.price)}</b>/unit\n` +
+    `📦 Stock: ${p.stock}\n\n` +
+    `📋 Product details\n${p.desc}\n` +
+    (p.features.length ? p.features.map((f) => `✅ ${f}`).join("\n") + "\n" : "") +
     (p.targetNote ? `\n🎯 ${p.targetNote}` : ""),
   comingSoon: "⏳ Coming soon — this product can't be bought yet. Check back later!",
   outOfStock: "🔴 Out of stock — this product is currently unavailable. Check back later!",
@@ -565,6 +569,7 @@ const en: Strings = {
     "💬 <b>Support</b>\n\nOrder / payment issues? Contact admin: @Dimas0227\n\nOr send a message right from here — the admin will reply in this chat.",
   supportAsk: "✉️ Write your message to the admin (one message), or /cancel to abort.",
   supportSent: "✅ Your message was forwarded to the admin. They'll reply here.",
+  supportOff: "💬 Support is currently unavailable.",
   supportForwarded: (name, tgId, text) =>
     `📩 <b>Support message</b> from ${name} (tg:${tgId}):\n\n${text}\n\n<i>Reply to this message to answer the buyer.</i>`,
   supportReplyHint: "Reply to a forwarded support message to answer the buyer.",
