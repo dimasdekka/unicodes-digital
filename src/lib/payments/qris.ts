@@ -326,6 +326,17 @@ export function getQrisPayment(id: string): QrisPaymentRow | undefined {
     .get(id) as QrisPaymentRow | undefined;
 }
 
+/** Pembayaran QRIS terbaru untuk satu referensi (order UD-… / top-up TOPUP-…). */
+export function getQrisPaymentByReference(
+  reference: string,
+): QrisPaymentRow | undefined {
+  return getDb()
+    .prepare(
+      "SELECT * FROM qris_payments WHERE reference = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .get(reference) as QrisPaymentRow | undefined;
+}
+
 /** Pembayaran pending yang belum kedaluwarsa (nominalnya masih "dipegang"). */
 export function listPendingQrisPayments(now: Date = new Date()): QrisPaymentRow[] {
   return getDb()

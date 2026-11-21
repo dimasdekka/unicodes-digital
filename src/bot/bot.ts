@@ -26,7 +26,8 @@ import {
   setOrderPaidVia,
   type StoreOrder,
 } from "../lib/orders";
-import { createQrisPayment } from "../lib/payments/qris";
+import { createQrisPayment, getQrisPaymentByReference } from "../lib/payments/qris";
+import { tickQrisPayments } from "../lib/payments/qris-poller";
 import { renderQrisCardOrPlain } from "../lib/payments/qris-card";
 import { getGopayStaticQris } from "../lib/payments/qris-settings";
 import { notifyBuyer } from "../lib/notify";
@@ -39,6 +40,7 @@ import {
   debitWallet,
   ensureUser,
   getReferralStats,
+  getTopup,
   getUser,
   getWallet,
   listPromoCodes,
@@ -467,18 +469,126 @@ async function payWithWallet(ctx: Context): Promise<void> {
 /** Kirim foto QR pembayaran: kartu standee komposit (QR dinamis di tengah
  *  frame standee) kalau template ada, QR polos kalau tidak. Nominal +
  *  kedaluwarsa ada di caption, bukan di gambar. */
+/** Foto QR: kartu standee Dim + QR dinamis di tengah. Referensi (id order
+ *  UD-… / id top-up TOPUP-…) menempelkan tombol "Saya Sudah Bayar" di bawah
+ *  foto — pembeli tap setelah bayar, bot langsung cek feed GoBiz saat itu
+ *  juga (di samping poller otomatis tiap 30 detik). */
 async function sendQrisPhoto(
   ctx: Context,
   qrString: string,
   caption: string,
+  reference?: string,
 ): Promise<void> {
   const id = uid(ctx);
   const { png } = await renderQrisCardOrPlain(qrString);
+  let replyMarkup: InlineKeyboard | undefined;
+  if (id != null) {
+    const s = sOf(id);
+    const kb = new InlineKeyboard();
+    if (reference) kb.text(s.qrisCheckButton, `qris_check:${reference}`).row();
+    kb.text(s.backMenu, "menu");
+    replyMarkup = kb;
+  }
   await ctx.replyWithPhoto(new InputFile(png, "qris-unicodes-digital.png"), {
     caption,
     parse_mode: "HTML",
-    reply_markup: id != null ? backRow(langOf(id)) : undefined,
+    reply_markup: replyMarkup,
   });
+}
+
+/** Cek manual pembayaran QRIS (tombol "Saya Sudah Bayar" di foto QR):
+ *  jalankan satu tick poller sekarang, lalu laporkan status referensi itu.
+ *  Throttle 10 detik per referensi supaya feed GoBiz tidak dihajar spam tap. */
+const MANUAL_QRIS_CHECK_MIN_MS = 10_000;
+const lastManualQrisCheck = new Map<string, number>();
+
+async function checkQrisPayment(ctx: Context, reference: string): Promise<void> {
+  const id = uid(ctx);
+  if (id == null) return;
+  const s = sOf(id);
+  const checkKb = new InlineKeyboard()
+    .text(s.qrisCheckButton, `qris_check:${reference}`)
+    .row()
+    .text(s.backMenu, "menu");
+  const now = Date.now();
+  const last = lastManualQrisCheck.get(reference) ?? 0;
+  if (now - last < MANUAL_QRIS_CHECK_MIN_MS) {
+    await ctx.reply(s.qrisCheckTooSoon, {
+      parse_mode: "HTML",
+      reply_markup: checkKb,
+    });
+    return;
+  }
+  lastManualQrisCheck.set(reference, now);
+  const tick = await tickQrisPayments();
+  if (!tick.ok) {
+    await ctx.reply(
+      tick.code === "auth_required" ? s.qrisCheckNoSession : s.qrisCheckFailed,
+      { parse_mode: "HTML", reply_markup: checkKb },
+    );
+    return;
+  }
+  const payment = getQrisPaymentByReference(reference);
+  if (reference.startsWith("UD-")) {
+    const order = await getStoreOrder(reference);
+    if (!order) {
+      await ctx.reply(s.qrisCheckFailed, { parse_mode: "HTML", reply_markup: checkKb });
+      return;
+    }
+    if (
+      order.status === "paid" ||
+      order.status === "processing" ||
+      order.status === "delivered"
+    ) {
+      await ctx.reply(s.qrisCheckFoundOrder(order.id), {
+        parse_mode: "HTML",
+        reply_markup: backRow(langOf(id)),
+      });
+      return;
+    }
+    if (
+      payment?.status === "expired" ||
+      (order.status === "failed" && (order.error ?? "").includes("kedaluwarsa"))
+    ) {
+      await ctx.reply(s.qrisCheckExpired, {
+        parse_mode: "HTML",
+        reply_markup: backRow(langOf(id)),
+      });
+      return;
+    }
+    await ctx.reply(s.qrisCheckPending, {
+      parse_mode: "HTML",
+      reply_markup: checkKb,
+    });
+    return;
+  }
+  if (reference.startsWith("TOPUP-")) {
+    const topup = getTopup(reference);
+    if (!topup) {
+      await ctx.reply(s.qrisCheckFailed, { parse_mode: "HTML", reply_markup: checkKb });
+      return;
+    }
+    if (topup.status === "paid") {
+      await ctx.reply(s.qrisCheckFoundTopup(topup.amountIdr), {
+        parse_mode: "HTML",
+        reply_markup: backRow(langOf(id)),
+      });
+      return;
+    }
+    if (payment?.status === "expired") {
+      await ctx.reply(s.qrisCheckExpired, {
+        parse_mode: "HTML",
+        reply_markup: backRow(langOf(id)),
+      });
+      return;
+    }
+    await ctx.reply(s.qrisCheckPending, {
+      parse_mode: "HTML",
+      reply_markup: checkKb,
+    });
+    return;
+  }
+  await ctx.reply(s.qrisCheckFailed, { parse_mode: "HTML", reply_markup: checkKb });
 }
 
 async function payWithQris(ctx: Context): Promise<void> {
@@ -541,6 +651,7 @@ async function payWithQris(ctx: Context): Promise<void> {
       ctx,
       qrString,
       s.qrisLink(order.id, order.retailTotalIdr, payment.unique_amount_idr, payment.expires_at),
+      order.id,
     );
   } catch (err) {
     console.error("[bot] QRIS gagal:", err);
@@ -607,6 +718,7 @@ async function startTopup(ctx: Context, amountIdr: number): Promise<void> {
       ctx,
       qrString,
       s.topupCreated(topup.amountIdr, payment.unique_amount_idr, payment.expires_at),
+      topup.id,
     );
   } catch (err) {
     console.error("[bot] top-up gagal:", err);
@@ -1051,6 +1163,11 @@ export function createBot(): Bot {
   bot.callbackQuery("pay_wallet", async (ctx) => {
     await answerCb(ctx);
     await payWithWallet(ctx);
+  });
+
+  bot.callbackQuery(/^qris_check:(.+)$/, async (ctx) => {
+    await answerCb(ctx);
+    await checkQrisPayment(ctx, ctx.match[1]);
   });
 
   bot.callbackQuery("pay_qris", async (ctx) => {

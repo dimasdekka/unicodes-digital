@@ -74,6 +74,15 @@ export interface Strings {
   qrisLink: (orderId: string, total: number, uniqueAmount: number, expiresAt: string) => string;
   /** Pesan gagal membuat QR (dengan alasan, kalau ada). */
   qrisFailed: (reason?: string) => string;
+  /** Tombol di foto QR: pembeli menekan setelah bayar -> cek feed sekarang. */
+  qrisCheckButton: string;
+  qrisCheckFoundOrder: (orderId: string) => string;
+  qrisCheckFoundTopup: (amount: number) => string;
+  qrisCheckPending: string;
+  qrisCheckExpired: string;
+  qrisCheckNoSession: string;
+  qrisCheckFailed: string;
+  qrisCheckTooSoon: string;
   freeOrderDone: (orderId: string) => string;
   walletTitle: (balance: number, totalTopup: number, totalSpent: number) => string;
   topupTitle: string;
@@ -204,6 +213,19 @@ const id: Strings = {
     `Kalau QR kedaluwarsa, buat order baru dari katalog. Lacak dengan /order ${orderId}`,
   qrisFailed: (reason) =>
     `❌ QR pembayaran belum bisa dibuat sekarang.${reason ? `\nAlasan: ${reason}` : ""}\n\nCoba lagi nanti atau hubungi admin.`,
+  qrisCheckButton: "✅ Saya Sudah Bayar",
+  qrisCheckFoundOrder: (orderId) =>
+    `✅ Pembayaran diterima! Order ${orderId} sedang diproses ke supplier — hasilnya dikirim ke chat ini.`,
+  qrisCheckFoundTopup: (amount) =>
+    `✅ Pembayaran diterima! Saldo ${rupiah(amount)} sudah masuk ke dompet kamu.`,
+  qrisCheckPending:
+    "⏳ Pembayaran belum masuk. Kalau kamu baru saja bayar, tunggu beberapa detik lalu tap tombolnya lagi.",
+  qrisCheckExpired:
+    "❌ QR sudah kedaluwarsa (5 menit). Buat order baru dari katalog.",
+  qrisCheckNoSession:
+    "⚠️ Sistem belum bisa mengecek pembayaran otomatis — sesi GoBiz belum login. Hubungi admin.",
+  qrisCheckFailed: "❌ Gagal mengecek pembayaran. Coba lagi sebentar.",
+  qrisCheckTooSoon: "⏳ Baru saja dicek — tunggu beberapa detik lagi.",
   freeOrderDone: (orderId) =>
     `✅ Order ${orderId} gratis berkat promo — langsung diproses ke supplier…`,
   walletTitle: (balance, totalTopup, totalSpent) =>
@@ -367,6 +389,19 @@ const en: Strings = {
     `If the QR expires, create a new order from the catalog. Track it with /order ${orderId}`,
   qrisFailed: (reason) =>
     `❌ Payment QR couldn't be created right now.${reason ? `\nReason: ${reason}` : ""}\n\nTry again later or contact support.`,
+  qrisCheckButton: "✅ I've Paid",
+  qrisCheckFoundOrder: (orderId) =>
+    `✅ Payment received! Order ${orderId} is being processed — the result will be sent to this chat.`,
+  qrisCheckFoundTopup: (amount) =>
+    `✅ Payment received! ${rupiah(amount)} has been added to your wallet.`,
+  qrisCheckPending:
+    "⏳ Payment hasn't arrived yet. If you just paid, wait a few seconds and tap the button again.",
+  qrisCheckExpired:
+    "❌ This QR has expired (5 minutes). Create a new order from the catalog.",
+  qrisCheckNoSession:
+    "⚠️ The system can't check payments automatically yet — the GoBiz session isn't logged in. Contact the admin.",
+  qrisCheckFailed: "❌ Couldn't check the payment. Try again in a moment.",
+  qrisCheckTooSoon: "⏳ Just checked — wait a few more seconds.",
   freeOrderDone: (orderId) =>
     `✅ Order ${orderId} is free thanks to the promo — processing it right away…`,
   walletTitle: (balance, totalTopup, totalSpent) =>

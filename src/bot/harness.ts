@@ -1578,6 +1578,105 @@ async function main(): Promise<void> {
   const sAfterBody = (await sAfter.json()) as { authenticated?: boolean };
   check("GoPay logout: sesi terhapus", sAfterBody.authenticated === false);
 
+  // ================= S32: tombol "Saya Sudah Bayar" (cek manual QRIS) =================
+  // Sesi dipulihkan dulu (S31 logout menghapusnya).
+  gopayClient.saveSession({
+    accessToken: "AT-HARNESS",
+    refreshToken: "RT-HARNESS",
+    tokenType: "Bearer",
+    expiresAt: Date.now() + 3600_000,
+    phone: "81234567890",
+    merchantId: "M-HARNESS",
+  });
+  const latestTopupId = (): string | undefined =>
+    (
+      getDb()
+        .prepare(
+          "SELECT id FROM wallet_topups WHERE tg_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .get(111) as { id: string } | undefined
+    )?.id;
+  const topupUnique = (id: string): number =>
+    (
+      getDb()
+        .prepare("SELECT unique_amount_idr FROM qris_payments WHERE reference = ?")
+        .get(id) as { unique_amount_idr: number }
+    ).unique_amount_idr;
+  stubControl.feedTransactions = [];
+  // (a) Foto QR top-up membawa tombol cek.
+  await send(cbUpdate(buyer, "topup:10000"));
+  const checkTopupId = latestTopupId();
+  const checkPhoto = lastCall("sendPhoto");
+  check(
+    "cek manual: foto QR top-up ada tombol Saya Sudah Bayar",
+    kbText(checkPhoto).includes("Saya Sudah Bayar") &&
+      kbText(checkPhoto).includes(`qris_check:${checkTopupId ?? "?"}`),
+    kbText(checkPhoto).slice(0, 200),
+  );
+  // (b) Tap cek, feed kosong -> "belum masuk".
+  err = await send(cbUpdate(buyer, `qris_check:${checkTopupId}`));
+  check(
+    "cek manual: feed kosong -> belum masuk",
+    err === null && lastText("sendMessage").includes("belum masuk"),
+    lastText("sendMessage").slice(0, 150),
+  );
+  // (c) Tap lagi langsung -> throttle 10 detik.
+  err = await send(cbUpdate(buyer, `qris_check:${checkTopupId}`));
+  check(
+    "cek manual: tap kedua langsung -> throttle",
+    lastText("sendMessage").includes("Baru saja dicek"),
+    lastText("sendMessage").slice(0, 150),
+  );
+  // (d) Top-up baru + feed cocok -> "diterima" + saldo masuk.
+  const balBefore = getWallet(111).balanceIdr;
+  await send(cbUpdate(buyer, "topup:50000"));
+  const checkTopup2Id = latestTopupId();
+  if (checkTopup2Id) {
+    stubControl.feedTransactions = [
+      { id: "TX-CHECK-50001", amountIdr: topupUnique(checkTopup2Id) },
+    ];
+  }
+  err = await send(cbUpdate(buyer, `qris_check:${checkTopup2Id}`));
+  check(
+    "cek manual: feed cocok -> diterima + saldo masuk",
+    lastText("sendMessage").includes("Pembayaran diterima") &&
+      getWallet(111).balanceIdr === balBefore + 50000,
+    `${lastText("sendMessage").slice(0, 120)} | saldo=${getWallet(111).balanceIdr}`,
+  );
+  // (e) Sesi GoBiz habis -> pesan jujur (bukan "belum masuk").
+  gopayClient.clearSession();
+  await send(cbUpdate(buyer, "topup:15000"));
+  const checkTopup3Id = latestTopupId();
+  err = await send(cbUpdate(buyer, `qris_check:${checkTopup3Id}`));
+  check(
+    "cek manual: sesi habis -> pesan sesi GoBiz belum login",
+    lastText("sendMessage").includes("sesi GoBiz belum login"),
+    lastText("sendMessage").slice(0, 150),
+  );
+  gopayClient.saveSession({
+    accessToken: "AT-HARNESS",
+    refreshToken: "RT-HARNESS",
+    tokenType: "Bearer",
+    expiresAt: Date.now() + 3600_000,
+    phone: "81234567890",
+    merchantId: "M-HARNESS",
+  });
+  // (f) QR kedaluwarsa -> pesan kedaluwarsa.
+  await send(cbUpdate(buyer, "topup:20000"));
+  const checkTopup4Id = latestTopupId();
+  if (checkTopup4Id) {
+    getDb()
+      .prepare("UPDATE qris_payments SET expires_at = ? WHERE reference = ?")
+      .run(new Date(Date.now() - 1000).toISOString(), checkTopup4Id);
+  }
+  stubControl.feedTransactions = [];
+  err = await send(cbUpdate(buyer, `qris_check:${checkTopup4Id}`));
+  check(
+    "cek manual: QR kedaluwarsa -> pesan kedaluwarsa",
+    lastText("sendMessage").includes("kedaluwarsa"),
+    lastText("sendMessage").slice(0, 150),
+  );
+
   // ---- ringkasan ----
   const failed = results.filter((r) => !r.ok);
   console.log(`\n==== ${results.length - failed.length}/${results.length} lolos ====`);
