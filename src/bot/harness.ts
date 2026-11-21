@@ -562,26 +562,36 @@ async function main(): Promise<void> {
   let err = await send(textUpdate(buyer, "/start"));
   check("/start tidak throw", err === null, err ?? undefined);
   check(
-    "/start menyapa nama + daftar produk + cara belanja, tanpa referral, tanpa statistik untuk user baru",
-    lastText("sendMessage").includes("Welcome to Unicodes Digital, Budi") &&
-      lastText("sendMessage").includes("Di sini kamu bisa beli") &&
-      lastText("sendMessage").includes("Muse AI Token") &&
-      lastText("sendMessage").includes("Cara belanja") &&
+    "/start ala Lhie: sapaan waktu + nama + Profil Saya + Aktivitas Toko, tanpa referral, tanpa baris channel (channel belum diset)",
+    /Selamat (pagi|siang|sore|malam), Budi — selamat datang di UNICODES DIGITAL/.test(
+      lastText("sendMessage"),
+    ) &&
+      lastText("sendMessage").includes("Profil Saya") &&
+      lastText("sendMessage").includes("ID Telegram: 111") &&
+      lastText("sendMessage").includes("Username: @budi") &&
+      lastText("sendMessage").includes("Total Transaksi: Rp0") &&
+      lastText("sendMessage").includes("Saldo Saya: Rp0") &&
+      lastText("sendMessage").includes("Aktivitas Toko") &&
+      lastText("sendMessage").includes("Pengguna Telegram: 1") &&
+      lastText("sendMessage").includes("Pesanan berhasil: 0") &&
+      !lastText("sendMessage").includes("channel resmi") &&
       !lastText("sendMessage").includes("UD-111") &&
-      !/referral/i.test(lastText("sendMessage")) &&
-      !lastText("sendMessage").includes("Total belanja") &&
-      !lastText("sendMessage").includes("0 order"),
-    lastText("sendMessage").slice(0, 300),
+      !/referral/i.test(lastText("sendMessage")),
+    lastText("sendMessage").slice(0, 400),
   );
   check(
-    "/start keyboard fokus Sondev: Katalog + Saldo + Pesanan, tanpa Referral/Promo/Reseller/Bahasa",
-    kbText(lastCall("sendMessage") as Call).includes("Katalog") &&
+    "/start keyboard ala Lhie: Lihat Produk + Saldo + Pesanan + Bahasa + Kebijakan, tanpa Referral/Promo/Reseller/API/Support/Channel",
+    kbText(lastCall("sendMessage") as Call).includes("Lihat Produk") &&
       kbText(lastCall("sendMessage") as Call).includes("Saldo") &&
       kbText(lastCall("sendMessage") as Call).includes("Pesanan") &&
+      kbText(lastCall("sendMessage") as Call).includes("Bahasa") &&
+      kbText(lastCall("sendMessage") as Call).includes("Kebijakan") &&
       !kbText(lastCall("sendMessage") as Call).includes("Referral") &&
       !kbText(lastCall("sendMessage") as Call).includes("Promo") &&
       !kbText(lastCall("sendMessage") as Call).includes("Reseller") &&
-      !kbText(lastCall("sendMessage") as Call).includes("Bahasa"),
+      !kbText(lastCall("sendMessage") as Call).includes("API") &&
+      !kbText(lastCall("sendMessage") as Call).includes("Support") &&
+      !kbText(lastCall("sendMessage") as Call).includes("Ikuti Channel"),
   );
 
   // ================= S2: referral via /start ref_ =================
@@ -712,8 +722,7 @@ async function main(): Promise<void> {
   check(
     "welcome menampilkan statistik setelah ada order",
     err === null &&
-      lastText().includes("📦 1 order") &&
-      lastText().includes("Total belanja: Rp1.500"),
+      lastText().includes("Total Transaksi: Rp1.500"),
     lastText().slice(0, 250),
   );
 
@@ -828,13 +837,13 @@ async function main(): Promise<void> {
   check("ganti ke EN tidak throw", err === null, err ?? undefined);
   check(
     "menu berbahasa Inggris (tombol)",
-    kbText(lastCall("editMessageText")).includes("Product Catalog"),
+    kbText(lastCall("editMessageText")).includes("View Products"),
     kbText(lastCall("editMessageText")).slice(0, 150),
   );
   err = await send(cbUpdate(buyer, "lang:id"));
   check(
     "kembali ke ID (tombol)",
-    kbText(lastCall("editMessageText")).includes("Katalog Produk"),
+    kbText(lastCall("editMessageText")).includes("Lihat Produk"),
     kbText(lastCall("editMessageText")).slice(0, 150),
   );
 
@@ -951,8 +960,8 @@ async function main(): Promise<void> {
   check(
     "/start mengirim banner (file_id benar + caption welcome + keyboard menu)",
     startPhoto?.photo === "TEST-BANNER-FILE-ID" &&
-      (startPhoto?.text ?? "").includes("Welcome to Unicodes Digital, Budi") &&
-      kbText(startPhoto).includes("Katalog"),
+      /Selamat (pagi|siang|sore|malam), Budi/.test(startPhoto?.text ?? "") &&
+      kbText(startPhoto).includes("Lihat Produk"),
     JSON.stringify({
       photo: startPhoto?.photo,
       caption: startPhoto?.text?.slice(0, 80),
@@ -971,7 +980,7 @@ async function main(): Promise<void> {
   check("/start file_id rusak tidak throw", err === null, err ?? undefined);
   check(
     "/start file_id rusak fallback ke teks welcome (tanpa foto baru)",
-    lastText("sendMessage").includes("Welcome to Unicodes Digital, Budi") &&
+    /Selamat (pagi|siang|sore|malam), Budi/.test(lastText("sendMessage")) &&
       calls.filter((c) => c.method === "sendPhoto").length === photosBeforeBad,
     lastText("sendMessage").slice(0, 120),
   );
@@ -981,7 +990,7 @@ async function main(): Promise<void> {
   check(
     "/start tanpa banner env fallback teks",
     err === null &&
-      lastText("sendMessage").includes("Welcome to Unicodes Digital, Budi"),
+      /Selamat (pagi|siang|sore|malam), Budi/.test(lastText("sendMessage")),
     err ?? lastText("sendMessage").slice(0, 120),
   );
 
@@ -1240,10 +1249,12 @@ async function main(): Promise<void> {
   check(
     "menu EN: welcome + tombol Inggris (tanpa referral)",
     err === null &&
-      lastText("sendMessage").includes("Welcome to Unicodes Digital") &&
+      /Good (morning|afternoon|evening), Budi — welcome to UNICODES DIGITAL/.test(
+        lastText("sendMessage"),
+      ) &&
       !lastText("sendMessage").includes("Referral code") &&
-      kbText(lastCall("sendMessage")).includes("Product Catalog") &&
-      kbText(lastCall("sendMessage")).includes("My Balance"),
+      kbText(lastCall("sendMessage")).includes("View Products") &&
+      kbText(lastCall("sendMessage")).includes("Balance"),
     lastText("sendMessage").slice(0, 200),
   );
   await send(cbUpdate(buyer, "lang:id"));
@@ -1485,7 +1496,7 @@ async function main(): Promise<void> {
   check(
     "tombol Menu Utama kembali ke menu",
     err === null &&
-      lastText("editMessageText").includes("Welcome to Unicodes Digital"),
+      lastText("editMessageText").includes("UNICODES DIGITAL"),
     lastText("editMessageText").slice(0, 120),
   );
 
@@ -1721,7 +1732,7 @@ async function main(): Promise<void> {
   check(
     "wajib-join: belum join -> layar join, bukan menu",
     lastText("sendMessage").includes("Gabung komunitas") &&
-      !lastText("sendMessage").includes("Welcome to Unicodes Digital"),
+      !lastText("sendMessage").includes("UNICODES DIGITAL"),
     lastText("sendMessage").slice(0, 150),
   );
   check(
@@ -1743,8 +1754,14 @@ async function main(): Promise<void> {
   err = await send(cbUpdate(buyer, "check_joined"));
   check(
     "wajib-join: sudah join -> menu muncul",
-    err === null && lastText().includes("Welcome to Unicodes Digital"),
+    err === null && lastText().includes("UNICODES DIGITAL"),
     lastText().slice(0, 150),
+  );
+  check(
+    "wajib-join: menu saat channel diset ada tombol Ikuti Channel + baris promo",
+    kbText(lastCall("editMessageText") as Call).includes("Ikuti Channel") &&
+      lastText("editMessageText").includes("channel resmi"),
+    kbText(lastCall("editMessageText") as Call).slice(0, 200),
   );
   // (d) Feed channel: order delivered diposting sekali, tersamar, tanpa isi hasil.
   const fakeOrder = {

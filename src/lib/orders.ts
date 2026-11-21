@@ -228,6 +228,21 @@ export async function getBuyerStats(
   return { orderCount: row.n, totalSpentIdr: row.total };
 }
 
+/** Statistik toko untuk layar /start ala Lhie: jumlah pengguna terdaftar
+ *  + jumlah order yang sudah berhasil (delivered). Angka nyata dari DB. */
+export function getStoreStats(): {
+  totalUsers: number;
+  deliveredOrders: number;
+} {
+  const users = getDb()
+    .prepare(`SELECT COUNT(*) AS n FROM users`)
+    .get() as { n: number };
+  const delivered = getDb()
+    .prepare(`SELECT COUNT(*) AS n FROM store_orders WHERE status = 'delivered'`)
+    .get() as { n: number };
+  return { totalUsers: users.n, deliveredOrders: delivered.n };
+}
+
 async function updateOrder(
   id: string,
   data: Partial<StoreOrder>,

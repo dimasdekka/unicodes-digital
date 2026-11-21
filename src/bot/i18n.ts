@@ -16,10 +16,25 @@ export const wibTime = (iso: string): string =>
     minute: "2-digit",
   });
 
+/** Data layar /start ala Lhie: profil pembeli + aktivitas toko.
+ *  channelUrl kosong = channel belum dikonfigurasi -> baris promo channel
+ *  dan tombol Ikuti Channel tidak ditampilkan. */
+export interface WelcomeParams {
+  name: string;
+  tgId: number;
+  username?: string;
+  totalSpentIdr: number;
+  balanceIdr: number;
+  totalUsers: number;
+  deliveredOrders: number;
+  channelUrl: string;
+  hourWib: number;
+}
+
 export interface Strings {
-  // Sapaan /start: nama + statistik order (hanya kalau orders > 0).
+  // Sapaan /start ala Lhie: profil + aktivitas toko + sapaan waktu.
   // Referral SENGAJA tidak ada di sini — hanya di menu 🎁 Referral.
-  welcome: (name: string, orders: number, spent: number) => string;
+  welcome: (p: WelcomeParams) => string;
   menuPrompt: string;
   catalog: string;
   myBalance: string;
@@ -30,6 +45,7 @@ export interface Strings {
   policy: string;
   reseller: string;
   language: string;
+  followChannel: string;
   backMenu: string;
   catalogTitle: string;
   catalogPickCategory: string;
@@ -147,26 +163,51 @@ export interface Strings {
 }
 
 const id: Strings = {
-  welcome: (name, orders, spent) =>
-    `⚡ Welcome to Unicodes Digital, ${name}! 💜\n\n` +
-    `Toko AI & produk digital — harga jujur, proses instan.\n\n` +
-    `🛍️ Di sini kamu bisa beli:\n` +
-    `• Muse AI Token — recharge 1B sampai 30B\n\n` +
-    `💳 Cara belanja: pilih produk → bayar via QRIS → token langsung dikirim ke akun kamu. Atau isi saldo dulu di menu Saldo Saya, biar checkout berikutnya lebih cepat.\n\n` +
-    (orders > 0
-      ? `📦 ${orders} order • Total belanja: ${rupiah(spent)}\n\n`
-      : "") +
-    `Pilih menu di bawah untuk mulai:`,
+  welcome: (p) => {
+    const greet =
+      p.hourWib >= 4 && p.hourWib < 10
+        ? "Selamat pagi"
+        : p.hourWib >= 10 && p.hourWib < 15
+          ? "Selamat siang"
+          : p.hourWib >= 15 && p.hourWib < 18
+            ? "Selamat sore"
+            : "Selamat malam";
+    const icon =
+      p.hourWib >= 4 && p.hourWib < 10
+        ? "🌅"
+        : p.hourWib >= 10 && p.hourWib < 15
+          ? "☀️"
+          : p.hourWib >= 15 && p.hourWib < 18
+            ? "🌇"
+            : "🌙";
+    return (
+      `${icon} ${greet}, ${p.name} — selamat datang di UNICODES DIGITAL\n` +
+      `————————————————\n` +
+      `🙀 Profil Saya\n` +
+      `🛡️ ID Telegram: ${p.tgId}\n` +
+      `💸 Username: ${p.username ? `@${p.username}` : "—"}\n` +
+      `💵 Total Transaksi: ${rupiah(p.totalSpentIdr)}\n` +
+      `💰 Saldo Saya: ${rupiah(p.balanceIdr)}\n\n` +
+      `📊 Aktivitas Toko\n` +
+      `😎 Pengguna Telegram: ${p.totalUsers}\n` +
+      `🧾 Pesanan berhasil: ${p.deliveredOrders}\n\n` +
+      (p.channelUrl
+        ? `📣 Promo, update stok, dan bukti transaksi terbaru tersedia di channel resmi Unicodes Digital.\n\n`
+        : "") +
+      `Mau ngapain dulu? Pilih tombol di bawah ya.`
+    );
+  },
   menuPrompt: "Pilih menu di bawah:",
-  catalog: "🛍️ Katalog Produk",
-  myBalance: "💳 Saldo Saya",
-  myOrders: "📦 Pesanan Saya",
+  catalog: "🛍️ Lihat Produk",
+  myBalance: "💳 Saldo",
+  myOrders: "📦 Pesanan",
   referral: "🎁 Referral",
   promo: "🎟️ Promo",
   support: "💬 Support",
   policy: "📜 Kebijakan",
   reseller: "🤝 Reseller & API",
   language: "🌐 Bahasa",
+  followChannel: "📢 Ikuti Channel Unicodes Digital",
   backMenu: "⬅️ Menu Utama",
   catalogTitle:
     "🛍️ <b>Katalog Produk</b>\n\nPilih produk untuk lihat detail & beli. Harga sudah termasuk semua biaya.",
@@ -340,26 +381,49 @@ const id: Strings = {
 };
 
 const en: Strings = {
-  welcome: (name, orders, spent) =>
-    `⚡ Welcome to Unicodes Digital, ${name}! 💜\n\n` +
-    `AI & digital products store — honest prices, instant delivery.\n\n` +
-    `🛍️ Here you can buy:\n` +
-    `• Muse AI Token — 1B to 30B recharge\n\n` +
-    `💳 How to shop: pick a product → pay via QRIS → the token is sent straight to your account. Or top up your balance in the My Balance menu first, so your next checkout is faster.\n\n` +
-    (orders > 0
-      ? `📦 ${orders} ${orders === 1 ? "order" : "orders"} • Total spent: ${rupiah(spent)}\n\n`
-      : "") +
-    `Pick a menu below to start:`,
+  welcome: (p) => {
+    const greet =
+      p.hourWib >= 4 && p.hourWib < 10
+        ? "Good morning"
+        : p.hourWib >= 10 && p.hourWib < 18
+          ? "Good afternoon"
+          : "Good evening";
+    const icon =
+      p.hourWib >= 4 && p.hourWib < 10
+        ? "🌅"
+        : p.hourWib >= 10 && p.hourWib < 15
+          ? "☀️"
+          : p.hourWib >= 15 && p.hourWib < 18
+            ? "🌇"
+            : "🌙";
+    return (
+      `${icon} ${greet}, ${p.name} — welcome to UNICODES DIGITAL\n` +
+      `————————————————\n` +
+      `🙀 My Profile\n` +
+      `🛡️ Telegram ID: ${p.tgId}\n` +
+      `💸 Username: ${p.username ? `@${p.username}` : "—"}\n` +
+      `💵 Total Spent: ${rupiah(p.totalSpentIdr)}\n` +
+      `💰 My Balance: ${rupiah(p.balanceIdr)}\n\n` +
+      `📊 Store Activity\n` +
+      `😎 Telegram Users: ${p.totalUsers}\n` +
+      `🧾 Successful Orders: ${p.deliveredOrders}\n\n` +
+      (p.channelUrl
+        ? `📣 Promos, stock updates, and the latest transaction proofs are available on the official Unicodes Digital channel.\n\n`
+        : "") +
+      `What would you like to do first? Pick a button below.`
+    );
+  },
   menuPrompt: "Pick a menu below:",
-  catalog: "🛍️ Product Catalog",
-  myBalance: "💳 My Balance",
-  myOrders: "📦 My Orders",
+  catalog: "🛍️ View Products",
+  myBalance: "💳 Balance",
+  myOrders: "📦 Orders",
   referral: "🎁 Referral",
   promo: "🎟️ Promo",
   support: "💬 Support",
   policy: "📜 Store Policy",
   reseller: "🤝 Reseller & API",
   language: "🌐 Language",
+  followChannel: "📢 Follow the Unicodes Digital Channel",
   backMenu: "⬅️ Main Menu",
   catalogTitle:
     "🛍️ <b>Product Catalog</b>\n\nPick a product to see details & buy. Prices are all-in.",

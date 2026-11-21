@@ -20,6 +20,7 @@ import {
   fulfillOrder,
   getBuyerStats,
   getStoreOrder,
+  getStoreStats,
   listOrdersByBuyer,
   markPaid,
   newOrderId,
@@ -114,12 +115,15 @@ function menuKeyboard(lang: Lang): InlineKeyboard {
   const kb = new InlineKeyboard();
   const webAppUrl = getWebAppUrl();
   if (webAppUrl) kb.webApp("🌐 Buka Toko", webAppUrl).row();
-  // FOKUS SONDEV (2026-11-21): menu disederhanakan — hanya inti belanja
-  // Muse. Referral / Promo / Reseller & API / Bahasa DISEMBUNYIKAN dulu
-  // (handler-nya tetap ada, tinggal tampilkan lagi tombolnya kalau perlu).
+  // Menu ala Lhie (2026-11-21): Lihat Produk penuh, Saldo | Pesanan,
+  // Bahasa | Kebijakan. API (Reseller & API) dan Support DISEMBUNYIKAN
+  // dulu (handler-nya tetap ada, tinggal tampilkan lagi tombolnya).
+  // Tombol Ikuti Channel hanya muncul kalau channel sudah dikonfigurasi.
   kb.text(s.catalog, "cat").row();
   kb.text(s.myBalance, "wallet").text(s.myOrders, "orders").row();
-  kb.text(s.support, "support").text(s.policy, "policy").row();
+  kb.text(s.language, "lang").text(s.policy, "policy").row();
+  const channelUrl = telegramChannelUrl();
+  if (channelUrl) kb.url(s.followChannel, channelUrl).row();
   return kb;
 }
 
@@ -227,17 +231,37 @@ async function requireJoined(ctx: Context): Promise<boolean> {
 
 // ---------------------------------------------------------------- menu ---
 
+/** Jam WIB (0-23) untuk sapaan waktu di /start. */
+function wibHour(date = new Date()): number {
+  const h = Number(
+    new Intl.DateTimeFormat("en-US", {
+      timeZone: "Asia/Jakarta",
+      hour: "numeric",
+      hour12: false,
+    }).format(date),
+  );
+  return h % 24;
+}
+
 async function showMenu(ctx: Context): Promise<void> {
   const id = uid(ctx);
   if (id == null) return;
   if (!(await requireJoined(ctx))) return;
   const s = sOf(id);
   const stats = await getBuyerStats(`tg:${id}`);
-  const text = s.welcome(
-    ctx.from?.first_name ?? "teman",
-    stats.orderCount,
-    stats.totalSpentIdr,
-  );
+  const wallet = getWallet(id);
+  const store = getStoreStats();
+  const text = s.welcome({
+    name: ctx.from?.first_name ?? "teman",
+    tgId: id,
+    username: ctx.from?.username,
+    totalSpentIdr: stats.totalSpentIdr,
+    balanceIdr: wallet.balanceIdr,
+    totalUsers: store.totalUsers,
+    deliveredOrders: store.deliveredOrders,
+    channelUrl: telegramChannelUrl(),
+    hourWib: wibHour(),
+  });
   const kb = menuKeyboard(langOf(id));
   // Home dari command (/start, /menu): kirim banner sebagai foto.
   // Dari tombol (callback) tetap edit teks — supaya chat tidak dipenuhi
